@@ -1,0 +1,17 @@
+# Khyept Language Support for VS Code
+
+Syntax highlighting and basic editor support for the Khyept programming language.
+
+Features:
+
+- `.khyept` and `.kypt` language detection
+- comments, strings, f-strings and interpolation
+- string escapes: `\\n`, `\\t`, `\\r`, `\\b`, `\\f`, `\\v`, `\\a`, `\\0`, octal, hex and Unicode forms
+- keywords, types, structures, constants, functions, numbers and operators
+- `if`/`elif` and `switch`/`case`/`default`/`break` syntax highlighting
+- bracket matching, auto-closing pairs and indentation
+- snippets for functions, variables, `print` and `println`
+
+## Install from the VSIX
+
+Run `Extensions: Install from VSIX...` in VS Code and select the generated `khyept-language-support-0.1.1.vsix` file.

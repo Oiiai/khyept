@@ -1,0 +1,19 @@
+struct student{
+    var int id;
+    var int age;
+    var string name;
+} s;
+
+fn int main(){
+
+    s.id = int(readln());
+    s.age = int(readln());
+    s.name = string(readln());
+    println(s.id);
+    println(s.age);
+    println(s.name);
+
+    return(0);
+}
+
+main();

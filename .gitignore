@@ -1,0 +1,4 @@
+/target/
+/k.obj
+/.workbuddy/
+*.vsix

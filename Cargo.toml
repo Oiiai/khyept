@@ -1,0 +1,11 @@
+[package]
+name = "kyptc"
+version = "0.1.0"
+edition = "2021"
+description = "A minimal interpreter for the Khyept language"
+
+[[bin]]
+name = "kyptc"
+path = "src/main.rs"
+
+[dependencies]

@@ -1,0 +1,43 @@
+/// Switch 语法：命中后默认继续执行后面的 case，break 会停止 fall-through
+var int n = 1;
+switch (n) {
+    case (1) {
+        println("A");
+        break;
+    }
+    case (2) {
+        println("B");
+        break;
+    }
+    case (3) {
+        println("C");
+        break;
+    }
+    default {
+        println("Unknown");
+        break;
+    }
+}
+
+/// 不写 break 会继续执行下一个 case
+var int day = 1;
+switch (day) {
+    case (1) { println("Monday"); }
+    case (2) { println("Tuesday"); }
+}
+
+/// 多值匹配和范围匹配
+var string name = "Jack";
+switch (name) {
+    case ("Tom", "Jack", "Jackson") { println("boy's name"); break; }
+    case ("Helen", "Jane") { println("girl's name"); break; }
+    default { println("unknown"); break; }
+}
+
+var int score = 7;
+switch (score) {
+    case (1...5) { println("1 <= score <= 5"); break; }
+    case (5<..10) { println("5 < score <= 10"); break; }
+    case (10..<51) { println("10 <= score < 51"); break; }
+    default { println(676767); break; }
+}

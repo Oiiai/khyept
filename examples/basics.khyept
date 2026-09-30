@@ -1,0 +1,22 @@
+/// Khyept 最小解释器示例
+let int num = 123;
+var int num1 = 123;
+num1 = 456;
+println(f"num={num}, num1={num1}");
+
+fn int add(int a, int b) {
+    return(a + b);
+}
+
+fn void main() {
+    var int result = add(num, num1);
+    println(f"result={result}");
+    let string name = readln("请输入名字: ");
+    println(f"你好，{name}!");
+}
+
+main();
+
+let int age = 20;
+let string category = if (age >= 18) { "adult" } else { "minor" };
+println(category);

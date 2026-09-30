@@ -1,0 +1,27 @@
+/// 斐波那契函数：覆盖 if / elif / else 语句
+fn int fibonacci(n) {
+    if (n <= 0) {
+        return(0);
+    }
+    elif (n == 1) {
+        return(1);
+    }
+    else {
+        return(fibonacci(n - 1) + fibonacci(n - 2));
+    }
+}
+
+fn void main() {
+    println(fibonacci(10));
+}
+
+main();
+
+let int age = 20;
+let result = if (age >= 18) {
+    "adult"
+} else {
+    "minor"
+};
+println(result);
+println(if (age >= 18) { "adult" } else { "minor" });

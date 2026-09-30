@@ -1,0 +1,3 @@
+*.vsix
+.gitignore
+node_modules/
