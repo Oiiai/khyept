@@ -2,7 +2,11 @@
   "name": "khyept-language-support",
   "displayName": "Khyept Language Support",
   "description": "Syntax highlighting and editor support for the Khyept programming language.",
-  "version": "0.1.1",
+  "version": "0.2.1",
+  "main": "./extension.js",
+  "activationEvents": [
+    "onCommand:khyept.build"
+  ],
   "publisher": "khyept",
   "license": "MIT",
   "engines": {
@@ -15,8 +19,14 @@
     "languages": [
       {
         "id": "khyept",
-        "aliases": ["Khyept", "khyept"],
-        "extensions": [".khyept", ".kypt"],
+        "aliases": [
+          "Khyept",
+          "khyept"
+        ],
+        "extensions": [
+          ".khyept",
+          ".kypt"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -32,6 +42,28 @@
         "language": "khyept",
         "path": "./snippets/khyept.json"
       }
-    ]
+    ],
+    "commands": [
+      {
+        "command": "khyept.build",
+        "title": "Khyept: Compile and Run",
+        "enablement": "editorLangId == khyept"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "khyept.build",
+        "key": "ctrl+shift+b",
+        "when": "editorLangId == khyept"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "khyept.build",
+          "when": "editorLangId == khyept"
+        }
+      ]
+    }
   }
 }

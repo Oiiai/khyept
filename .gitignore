@@ -2,3 +2,6 @@
 /k.obj
 /.workbuddy/
 *.vsix
+vscode-khyept/.vsix-stage/
+vscode-khyept/\[Content_Types\].xml
+vscode-khyept/extension.vsixmanifest

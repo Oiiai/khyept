@@ -1,4 +1,4 @@
-/// Khyept 最小解释器示例
+/// Khyept 示例
 let int num = 123;
 var int num1 = 123;
 num1 = 456;

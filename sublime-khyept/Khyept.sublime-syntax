@@ -1,0 +1,121 @@
+%YAML 1.2
+---
+name: Khyept
+file_extensions:
+  - khyept
+  - kypt
+scope: source.khyept
+version: 2
+
+contexts:
+  main:
+    - include: comments
+    - include: strings
+    - include: structs
+    - include: keywords
+    - include: types
+    - include: constants
+    - include: functions
+    - include: numbers
+    - include: operators
+    - include: punctuation
+
+  comments:
+    - match: '///.*$'
+      scope: comment.line.khyept
+    - match: '/\\*'
+      scope: punctuation.definition.comment.begin.khyept
+      push:
+        - meta_scope: comment.block.khyept
+        - match: '\*/'
+          scope: punctuation.definition.comment.end.khyept
+          pop: true
+
+  strings:
+    - match: 'f"'
+      scope: storage.type.format.khyept punctuation.definition.string.begin.khyept
+      push: f-string
+    - match: '"'
+      scope: punctuation.definition.string.begin.khyept
+      push: double-string
+    - match: "'"
+      scope: punctuation.definition.string.begin.khyept
+      push: single-string
+
+  double-string:
+    - meta_scope: string.quoted.double.khyept
+    - match: '\\\\(?:[ntrbfva0\\\\"'']|[1-7][0-7]{0,2}|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})'
+      scope: constant.character.escape.khyept
+    - match: '"'
+      scope: punctuation.definition.string.end.khyept
+      pop: true
+
+  single-string:
+    - meta_scope: string.quoted.single.khyept
+    - match: '\\\\(?:[ntrbfva0\\\\"'']|[1-7][0-7]{0,2}|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})'
+      scope: constant.character.escape.khyept
+    - match: "'"
+      scope: punctuation.definition.string.end.khyept
+      pop: true
+
+  f-string:
+    - meta_scope: string.quoted.double.khyept
+    - match: '\\\\(?:[ntrbfva0\\\\"'']|[1-7][0-7]{0,2}|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})'
+      scope: constant.character.escape.khyept
+    - match: '\{'
+      scope: punctuation.section.interpolation.begin.khyept
+      push: interpolation
+    - match: '"'
+      scope: punctuation.definition.string.end.khyept
+      pop: true
+
+  interpolation:
+    - meta_scope: meta.interpolation.khyept
+    - include: constants
+    - include: numbers
+    - include: operators
+    - include: functions
+    - match: '[A-Za-z_][A-Za-z0-9_]*'
+      scope: variable.other.khyept
+    - match: '\}'
+      scope: punctuation.section.interpolation.end.khyept
+      pop: true
+
+  structs:
+    - match: '\b(struct)\s+([A-Za-z_][A-Za-z0-9_]*)'
+      captures:
+        1: keyword.control.struct.khyept
+        2: entity.name.type.struct.khyept
+
+  keywords:
+    - match: '\b(?:let|var|struct|fn|return|global|if|elif|else|switch|case|default|while|for|do|break|continue)\b'
+      scope: keyword.control.khyept
+
+  types:
+    - match: '\b(?:int|float|string|bool|void)\b'
+      scope: storage.type.khyept
+
+  constants:
+    - match: '\b(?:true|false|null)\b'
+      scope: constant.language.khyept
+
+  functions:
+    - match: '\bfn\s+(?:(?:int|float|string|bool|void)\s+)?([A-Za-z_][A-Za-z0-9_]*)(?=\s*\()'
+      captures:
+        1: entity.name.function.khyept
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.call.khyept
+
+  numbers:
+    - match: '\b(?:0[xX][0-9A-Fa-f]+|0[bB][01]+|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)\b'
+      scope: constant.numeric.khyept
+
+  operators:
+    - match: '===|!==|\+\+|--|\+=|-=|\*=|/=|%=|==|!=|<=|>=|\.\.\.|<\.\.|\.\.<|=|\+|-|\*|/|%|<|>|!'
+      scope: keyword.operator.khyept
+
+  punctuation:
+    - match: '[;,.:]'
+      scope: punctuation.separator.khyept
+    - match: '[{}\\[\\]()]'
+      scope: punctuation.bracket.khyept

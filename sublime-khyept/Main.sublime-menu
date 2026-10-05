@@ -1,0 +1,9 @@
+[
+  {
+    "caption": "Syntax",
+    "mnemonic": "S",
+    "children": [
+      { "command": "set_unsaved_view_name", "args": { "name": "Khyept" }, "caption": "Khyept" }
+    ]
+  }
+]

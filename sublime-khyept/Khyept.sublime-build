@@ -1,0 +1,16 @@
+{
+    "target": "exec",
+    "interactive": true,
+    "shell_cmd": "kyptc \"$file\"",
+    "working_dir": "$file_path",
+    "selector": "source.khyept",
+    "file_regex": "第 ([0-9]+) 行：(?P<message>.*)$",
+    "encoding": "utf-8",
+    "quiet": false,
+    "variants": [
+        {
+            "name": "Run with kyptc",
+            "shell_cmd": "kyptc \"$file\""
+        }
+    ]
+}
