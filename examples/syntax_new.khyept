@@ -1,0 +1,72 @@
+/// 新语法验证：变量声明 + 函数声明
+
+/// 1. 类型标注在后：var n : int = 5
+var n : int = 5;
+println(f"n = {n}");
+
+/// 2. 常量：let s : string = "A"
+let s : string = "A";
+println(f"s = {s}");
+
+/// 3. 自动推断：var x := 5
+var x := 5;
+println(f"x = {x}, type = {type(x)}");
+
+/// 4. 推断字符串和浮点
+var name := "Khyept";
+var pi := 3.14;
+var flag := true;
+println(f"{name} / {pi} / {flag}");
+
+/// 5. 参数标注在后：fn add(a : int, b : int) -> int
+fn add(a : int, b : int) -> int {
+    return(a + b);
+}
+
+/// 6. 不写返回类型，默认 void
+fn greet() {
+    println("hello");
+}
+
+/// 7. 显式 void
+fn nothing() -> void {
+    println("nothing");
+}
+
+/// 8. 无类型参数（动态），但需要显式声明返回类型
+fn double(v) -> int {
+    return(v * 2);
+}
+
+println(f"add(3, 4) = {add(3, 4)}");
+greet();
+nothing();
+println(f"double(21) = {double(21)}");
+
+println("=== 列表下标赋值 ===");
+var l : list = [0, 1, 2, 3];
+l[1] = 20;
+println(f"l[1] = {l[1]}");
+l[size(l)] = 99;          /// 下标等于长度时追加
+println(f"追加后长度 = {size(l)}");
+var g : list = [[0, 0], [0, 0]];
+g[0][1] = 5;              /// 嵌套赋值
+println(f"g = {g}");
+
+println("=== 逻辑运算符 ===");
+var a := 5;
+var b := 7;
+if (a == 5 && b == 7) println("a5 b7");
+elif (a == 5 || b == 7) println("a5 or b7");
+elif (!(a == 5) && !(b == 7)) println("!a5 !b7");
+
+println("=== 更多运算符 ===");
+println(f"7 // 2 = {7 // 2}");
+println(f"7 % 2  = {7 % 2}");
+println(f"2 ** 3 = {2 ** 3}");
+println(f"5 & 3  = {5 & 3}");
+println(f"5 | 3  = {5 | 3}");
+println(f"5 ^ 3  = {5 ^ 3}");
+println(f"~5     = {~5}");
+println(f"5 << 1 = {5 << 1}");
+println(f"5 >> 1 = {5 >> 1}");

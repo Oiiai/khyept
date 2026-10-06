@@ -1,0 +1,85 @@
+/// 文件 IO、字符串下标、len 与 .size() 的综合验证
+
+/// === 1. 结构体构造歧义已修复 ===
+struct P { var x : int; var y : string; }
+
+var p1 = P{1, "a"};
+var p2 : P = P{2, "b"};
+println(f"构造: ({p1.x},{p1.y}) ({p2.x},{p2.y})");
+
+/// 结构体定义后紧跟普通语句也不该报错
+struct Q { var n : int; }
+var q : Q = Q{9};
+
+println("");
+
+/// === 2. 字符串下标与切片 ===
+var s : string = "Hello, World!";
+s[0] = "h";
+println(s + " " + s[0]);
+println("");
+println(f"s[1:]  = {s[1:]}");
+println(f"s[:5]  = {s[:5]}");
+println(f"s[0:5] = {s[0:5]}");
+println(f"s[7:]  = {s[7:]}");
+
+println("");
+
+/// === 3. 字符串拼接 ===
+var s1 : string = "Hello";
+var s2 : string = "World";
+var s3 : string = s1 + ", " + s2 + "!";
+println(s3);
+
+println("");
+
+/// === 4. len 与 .size() ===
+println(f"len(s3)  = {len(s3)}");
+println(f"s3.size() = {s3.size()}");
+
+var l : list = [1, 2, 3];
+var d : dict = {"a": 1, "b": 2};
+println(f"len(l)   = {len(l)}, l.size() = {l.size()}");
+println(f"len(d)   = {len(d)}, d.size() = {d.size()}");
+
+println("");
+
+/// === 5. 文件 IO ===
+/// 写入（覆盖）
+var f : string = open("222.txt", "w", encoding="utf-8");
+f.write("Hello, World!");
+f.close();
+
+/// 读取
+var g : string = open("222.txt", "r", encoding="utf-8");
+var content : string = g.read();
+g.close();
+println(f"读取: {content}");
+
+/// 写入（追加）
+var h : string = open("222.txt", "a", encoding="utf-8");
+h.write("\n追加一行~");
+h.close();
+
+var g2 : string = open("222.txt", "r", encoding="utf-8");
+println(f"追加后: {g2.read()}");
+g2.close();
+
+println("");
+
+/// 一次写入多行
+var lines := ["第一行\n", "第二行\n", "第三行\n"];
+var f2 : string = open("444.txt", "w", encoding="utf-8");
+f2.writeln(lines);
+f2.close();
+
+var f3 : string = open("444.txt", "r", encoding="utf-8");
+println(f3.read());
+f3.close();
+
+/// === 6. 二进制写入 ===
+var data : list = [0, 1, 2, 3];
+var f4 : string = open("333.bin", "wb");
+f4.write(data);
+f4.close();
+println(f"二进制写入完成，长度 {len(data)}");

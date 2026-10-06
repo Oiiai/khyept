@@ -1,10 +1,10 @@
 struct student{
-    var int id;
-    var int age;
-    var string name;
+    var id : int;
+    var age : int;
+    var name : string;
 } s;
 
-fn int main(){
+fn main() -> int {
 
     s.id = int(readln());
     s.age = int(readln());

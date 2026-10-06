@@ -92,7 +92,7 @@ contexts:
       scope: keyword.control.khyept
 
   types:
-    - match: '\b(?:int|float|string|bool|void)\b'
+    - match: '\b(?:int|float|string|bool|void|list|dict)\b'
       scope: storage.type.khyept
 
   constants:
@@ -111,7 +111,7 @@ contexts:
       scope: constant.numeric.khyept
 
   operators:
-    - match: '===|!==|\+\+|--|\+=|-=|\*=|/=|%=|==|!=|<=|>=|\.\.\.|<\.\.|\.\.<|=|\+|-|\*|/|%|<|>|!'
+    - match: '===|!==|\+\+|--|\+=|-=|\*=|/=|%=|==|!=|<=|>=|\.\.\.|<\.\.|\.\.<|->|:=|&&|\|\||<<|>>|\*\*|//|~|\^|[=+\-*/%<>!&|]'
       scope: keyword.operator.khyept
 
   punctuation:

@@ -1,5 +1,5 @@
 /// 斐波那契函数：覆盖 if / elif / else 语句
-fn int fibonacci(n) {
+fn fibonacci(n) -> int {
     if (n <= 0) {
         return(0);
     }
@@ -11,13 +11,13 @@ fn int fibonacci(n) {
     }
 }
 
-fn void main() {
+fn main() {
     println(fibonacci(10));
 }
 
 main();
 
-let int age = 20;
+let age : int = 20;
 let result = if (age >= 18) {
     "adult"
 } else {

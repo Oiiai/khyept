@@ -22,7 +22,7 @@ struct Token {
 fn lex(source: &str) -> Result<Vec<Token>, String> {
     let chars: Vec<char> = source.chars().collect();
     let mut tokens = Vec::new();
-    let (mut i, mut line) = (0, 1);
+    let (mut i, mut line) = (0usize, 1usize);
     while i < chars.len() {
         let c = chars[i];
         if c.is_whitespace() {
@@ -32,8 +32,9 @@ fn lex(source: &str) -> Result<Vec<Token>, String> {
             i += 1;
             continue;
         }
-        if c == '/' && chars.get(i + 1) == Some(&'/') {
-            i += 2;
+        // 行注释必须是 `///`（三个斜杠），这样 `//` 专属于整除运算符
+        if c == '/' && chars.get(i + 1) == Some(&'/') && chars.get(i + 2) == Some(&'/') {
+            i += 3;
             while i < chars.len() && chars[i] != '\n' {
                 i += 1;
             }
@@ -112,36 +113,41 @@ fn lex(source: &str) -> Result<Vec<Token>, String> {
             });
             continue;
         }
-        if c == '<' && chars.get(i + 1) == Some(&'.') && chars.get(i + 2) == Some(&'.') {
+        // 多字符运算符优先匹配
+        const MULTI: [&str; 15] = [
+            "<..", "..<", "...", "**", "<<", ">>", "&&", "||", "->", ":=", "//", "==", "!=",
+            "<=", ">=",
+        ];
+        let mut matched_multi = None;
+        for candidate in MULTI {
+            let cands: Vec<char> = candidate.chars().collect();
+            if chars[i..].starts_with(&cands[..]) {
+                matched_multi = Some(candidate);
+                break;
+            }
+        }
+        if let Some(op) = matched_multi {
             tokens.push(Token {
-                kind: TokenKind::Operator("<..".into()),
+                kind: TokenKind::Operator(op.to_owned()),
                 line: token_line,
             });
-            i += 3;
+            i += op.chars().count();
             continue;
         }
-        if c == '.' && chars.get(i + 1) == Some(&'.') && chars.get(i + 2) == Some(&'<') {
+        if c == '+' && chars.get(i + 1) == Some(&'+')
+            || c == '-' && chars.get(i + 1) == Some(&'-')
+        {
             tokens.push(Token {
-                kind: TokenKind::Operator("..<".into()),
+                kind: TokenKind::Operator(format!("{c}{c}")),
                 line: token_line,
             });
-            i += 3;
-            continue;
-        }
-        if c == '.' && chars.get(i + 1) == Some(&'.') && chars.get(i + 2) == Some(&'.') {
-            tokens.push(Token {
-                kind: TokenKind::Operator("...".into()),
-                line: token_line,
-            });
-            i += 3;
+            i += 2;
             continue;
         }
         if "+-*/%=!<>".contains(c) {
             let mut op = c.to_string();
-            if (matches!(c, '+' | '-') && chars.get(i + 1) == Some(&c))
-                || chars.get(i + 1) == Some(&'=')
-            {
-                op.push(chars[i + 1]);
+            if chars.get(i + 1) == Some(&'=') {
+                op.push('=');
                 i += 1;
             }
             i += 1;
@@ -149,6 +155,14 @@ fn lex(source: &str) -> Result<Vec<Token>, String> {
                 kind: TokenKind::Operator(op),
                 line: token_line,
             });
+            continue;
+        }
+        if "&|^~".contains(c) {
+            tokens.push(Token {
+                kind: TokenKind::Operator(c.to_string()),
+                line: token_line,
+            });
+            i += 1;
             continue;
         }
         if "(){}[],;:.".contains(c) {
@@ -273,7 +287,17 @@ enum Expr {
     Prefix(String, Box<Expr>),
     Postfix(String, Box<Expr>),
     Index(Box<Expr>, Box<Expr>),
+    /// 切片：s[a:b]、s[a:]、s[:b]
+    Slice {
+        target: Box<Expr>,
+        from: Option<Box<Expr>>,
+        to: Option<Box<Expr>>,
+    },
     Member(Box<Expr>, String),
+    /// 方法调用：obj.method(args)
+    MethodCall(Box<Expr>, String, Vec<Expr>),
+    /// 命名参数：name = value
+    NamedArg(String, Box<Expr>),
     Call(String, Vec<Expr>),
     List(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
@@ -315,6 +339,7 @@ enum Stmt {
         mutable: bool,
         annotation: Option<String>,
         value: Option<Expr>,
+        inferred: bool,
     },
     Assign {
         target: Expr,
@@ -327,6 +352,7 @@ enum Stmt {
     Function {
         name: String,
         params: Vec<(String, Option<String>)>,
+        returns: Option<String>,
         body: Vec<Stmt>,
     },
     Struct {
@@ -379,7 +405,7 @@ struct StructInstance {
     initializers: Vec<Vec<Expr>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum Value {
     Null,
     Bool(bool),
@@ -392,9 +418,17 @@ enum Value {
         name: String,
         fields: Vec<StructMember>,
     },
+    /// 文件句柄：open() 的返回值，用户视角下就是字符串
+    File {
+        path: String,
+        mode: String,
+        encoding: String,
+        /// r+ / w 模式下已写入的字节数，用于决定写入位置
+        position: usize,
+    },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct StructMember {
     name: String,
     value: Value,
@@ -490,11 +524,11 @@ impl Parser {
             let condition = self.condition()?;
             return Ok(Stmt::While {
                 condition,
-                body: self.block()?,
+                body: self.body()?,
             });
         }
         if self.eat_ident("do") {
-            let body = self.block()?;
+            let body = self.body()?;
             if !self.eat_ident("while") {
                 return Err(self.error("do 循环后期望 `while`"));
             }
@@ -520,21 +554,29 @@ impl Parser {
             return Ok(Stmt::Global(names));
         }
         if self.eat_ident("fn") {
+            // 新语法：fn name(...) -> T
+            // 旧语法：fn T name(...) 仍然兼容
             let first = self.ident()?;
+            let mut legacy_return: Option<String> = None;
             let name = if self.is_symbol('(') {
                 first
             } else {
+                legacy_return = Some(first);
                 self.ident()?
             };
             self.expect_symbol('(')?;
             let mut params = Vec::new();
             if !self.is_symbol(')') {
                 loop {
-                    let a = self.ident()?;
-                    let (annotation, param) = if self.current_is_ident() {
-                        (Some(a), self.ident()?)
+                    let first_param = self.ident()?;
+                    // 新语法 a : int；旧语法 int a
+                    let (annotation, param) = if self.is_symbol(':') {
+                        self.advance();
+                        (Some(self.ident()?), first_param)
+                    } else if self.current_is_ident() {
+                        (Some(first_param), self.ident()?)
                     } else {
-                        (None, a)
+                        (None, first_param)
                     };
                     params.push((param, annotation));
                     if !self.eat_symbol(',') {
@@ -543,8 +585,20 @@ impl Parser {
                 }
             }
             self.expect_symbol(')')?;
+            // 新语法：-> int；不写返回类型默认为 void
+            let returns = if self.is_operator("->") {
+                self.advance();
+                Some(self.ident()?)
+            } else {
+                legacy_return.or_else(|| Some("void".to_owned()))
+            };
             let body = self.block()?;
-            return Ok(Stmt::Function { name, params, body });
+            return Ok(Stmt::Function {
+                name,
+                params,
+                returns,
+                body,
+            });
         }
         if self.eat_ident("return") {
             let value = if self.is_symbol('(') {
@@ -585,8 +639,28 @@ impl Parser {
         Ok(Stmt::Expr(expr))
     }
     fn var_statement(&mut self, mutable: bool, consume_semicolon: bool) -> Result<Stmt, String> {
+        // 新语法：var n : int = 5 / var n := 5
+        // 旧语法：var int n = 5（类型前置，仍然兼容）
         let first = self.ident()?;
-        let (annotation, name) = if self.current_is_ident() {
+        //`:=` 是一个完整的运算符 token，消费后直接读初始值
+        if self.is_operator(":=") {
+            self.advance();
+            let value = self.expression(0)?;
+            if consume_semicolon {
+                self.eat_symbol(';');
+            }
+            return Ok(Stmt::Var {
+                name: first,
+                mutable,
+                annotation: None,
+                value: Some(value),
+                inferred: true,
+            });
+        }
+        let (annotation, name) = if self.is_symbol(':') {
+            self.advance();
+            (Some(self.ident()?), first)
+        } else if self.current_is_ident() {
             (Some(first), self.ident()?)
         } else {
             (None, first)
@@ -610,6 +684,7 @@ impl Parser {
             mutable,
             annotation,
             value,
+            inferred: false,
         })
     }
     fn struct_statement(&mut self) -> Result<Stmt, String> {
@@ -625,7 +700,11 @@ impl Parser {
                 return Err(self.error("结构体成员需要 `let` 或 `var`"));
             };
             let first = self.ident()?;
-            let (annotation, field_name) = if self.current_is_ident() {
+            // 新语法：var id : int；旧语法 var int id 仍兼容
+            let (annotation, field_name) = if self.is_symbol(':') {
+                self.advance();
+                (Some(self.ident()?), first)
+            } else if self.current_is_ident() {
                 (Some(first), self.ident()?)
             } else {
                 (None, first)
@@ -655,8 +734,16 @@ impl Parser {
         if self.is_symbol(';') || !self.current_is_ident() {
             return Ok(instances);
         }
+        // `struct A { ... }` 之后的标识符可能是实例名，也可能是下一条语句的开头
+        // （例如 `var x = 1;` 或 `fn foo() {}`）。只有当它既不是关键字、
+        // 后面也不紧跟 `(` 时，才当作实例名。
         loop {
-            let mut name = self.ident()?;
+            let name = self.ident()?;
+            if self.reserved_word(&name) {
+                // 回退：把刚读到的标识符留给上层当作新语句的开头
+                self.at -= 1;
+                break;
+            }
             let mut initializers = Vec::new();
             while self.is_symbol('{') || self.is_symbol('[') {
                 let mut values = Vec::new();
@@ -676,11 +763,20 @@ impl Parser {
                 }
                 self.expect_symbol(closing)?;
                 initializers.push(values);
-                if self.current_is_ident() {
-                    name = self.ident()?;
+                // `} a{1,2}, b;` 形式：逗号或下一个标识符继续
+                if self.is_symbol(',') {
+                    break;
+                }
+                if self.current_is_ident() && !self.peek_is_statement_start() {
+                    self.advance();
+                } else {
+                    break;
                 }
             }
-            instances.push(StructInstance { name, initializers });
+            instances.push(StructInstance {
+                name,
+                initializers,
+            });
             if !self.eat_symbol(',') {
                 break;
             }
@@ -689,6 +785,40 @@ impl Parser {
             }
         }
         Ok(instances)
+    }
+    /// 判断 `self.at` 处的标识符是否是保留字
+    fn reserved_word(&self, name: &str) -> bool {
+        matches!(
+            name,
+            "let" | "var"
+                | "fn"
+                | "struct"
+                | "if"
+                | "elif"
+                | "else"
+                | "while"
+                | "for"
+                | "do"
+                | "switch"
+                | "case"
+                | "default"
+                | "break"
+                | "return"
+                | "global"
+                | "println"
+                | "print"
+                | "readln"
+        )
+    }
+    /// 向前看：当前标识符之后若是 `{`/`(`/`=` 等，说明它更可能是语句开头而非实例名
+    fn peek_is_statement_start(&self) -> bool {
+        matches!(
+            self.tokens.get(self.at + 1).map(|t| &t.kind),
+            Some(TokenKind::Symbol('('))
+                | Some(TokenKind::Symbol('{'))
+                | Some(TokenKind::Symbol('='))
+                | Some(TokenKind::Symbol(':'))
+        )
     }
     fn struct_initializer(&mut self, name: &str) -> Result<Expr, String> {
         self.expect_symbol('{')?;
@@ -779,7 +909,7 @@ impl Parser {
             init,
             condition,
             update,
-            body: self.block()?,
+            body: self.body()?,
         })
     }
     fn current_is_ident(&self) -> bool {
@@ -798,14 +928,14 @@ impl Parser {
         let mut branches = Vec::new();
         let mut condition = first;
         loop {
-            branches.push((condition, self.block()?));
+            branches.push((condition, self.body()?));
             if self.eat_ident("elif") {
                 condition = self.condition()?;
             } else if self.eat_ident("else") {
                 if self.eat_ident("if") {
                     condition = self.condition()?;
                 } else {
-                    return Ok((branches, Some(self.block()?)));
+                    return Ok((branches, Some(self.body()?)));
                 }
             } else {
                 return Ok((branches, None));
@@ -821,6 +951,14 @@ impl Parser {
         self.expect_symbol('}')?;
         Ok(body)
     }
+    /// 语句体：可以是 `{ ... }`，也可以只跟一条语句。
+    /// 这样 `if (c) println("x");` 与 `while (c) i++;` 都能写。
+    fn body(&mut self) -> Result<Vec<Stmt>, String> {
+        if self.is_symbol('{') {
+            return self.block();
+        }
+        Ok(vec![self.statement()?])
+    }
     fn switch_statement(&mut self) -> Result<Stmt, String> {
         self.expect_symbol('(')?;
         let value = self.expression(0)?;
@@ -834,13 +972,13 @@ impl Parser {
                     return Err(self.error("case 不能出现在 default 之后"));
                 }
                 let pattern = self.case_pattern()?;
-                let body = self.block()?;
+                let body = self.body()?;
                 cases.push(SwitchCase { pattern, body });
             } else if self.eat_ident("default") {
                 if default.is_some() {
                     return Err(self.error("switch 中只能有一个 default"));
                 }
-                default = Some(self.block()?);
+                default = Some(self.body()?);
             } else {
                 return Err(self.error("switch 中期望 case、default 或 `}`"));
             }
@@ -882,18 +1020,19 @@ impl Parser {
         Ok(CasePattern::Values(values))
     }
     fn expression(&mut self, min_prec: u8) -> Result<Expr, String> {
-        let mut left = if self.is_operator("-") || self.is_operator("!") {
+        let mut left = if self.is_operator("-") || self.is_operator("!") || self.is_operator("~") {
             let op = match self.advance().kind {
                 TokenKind::Operator(s) => s,
                 _ => unreachable!(),
             };
-            Expr::Unary(op, Box::new(self.expression(7)?))
+            // 一元运算符绑定最紧
+            Expr::Unary(op, Box::new(self.expression(12)?))
         } else if self.is_operator("++") || self.is_operator("--") {
             let op = match self.advance().kind {
                 TokenKind::Operator(s) => s,
                 _ => unreachable!(),
             };
-            let operand = self.expression(7)?;
+            let operand = self.expression(12)?;
             Expr::Prefix(op, Box::new(operand))
         } else {
             self.primary()?
@@ -913,16 +1052,29 @@ impl Parser {
                 _ => break,
             };
             let prec = match op.as_str() {
-                "==" | "!=" | ">" | ">=" | "<" | "<=" => 1,
-                "+" | "-" => 2,
-                "*" | "/" | "%" => 3,
+                "||" => 1,
+                "&&" => 2,
+                "|" => 3,
+                "^" => 4,
+                "&" => 5,
+                "==" | "!=" => 6,
+                "<" | ">" | "<=" | ">=" => 7,
+                "<<" | ">>" => 8,
+                "+" | "-" => 9,
+                "*" | "/" | "//" | "%" => 10,
+                "**" => 11,
                 _ => break,
             };
             if prec < min_prec {
                 break;
             }
             self.advance();
-            let right = self.expression(prec + 1)?;
+            // `**` 右结合：2 ** 3 ** 2 == 2 ** (3 ** 2)
+            let right = if op == "**" {
+                self.expression(prec)?
+            } else {
+                self.expression(prec + 1)?
+            };
             left = Expr::Binary(Box::new(left), op, Box::new(right));
         }
         Ok(left)
@@ -968,7 +1120,7 @@ impl Parser {
                     let mut args = Vec::new();
                     if !self.is_symbol(')') {
                         loop {
-                            args.push(self.expression(0)?);
+                            args.push(self.call_argument()?);
                             if !self.eat_symbol(',') {
                                 break;
                             }
@@ -976,6 +1128,20 @@ impl Parser {
                     }
                     self.expect_symbol(')')?;
                     Ok(Expr::Call(name, args))
+                } else if self.is_symbol('{') {
+                    // 结构体构造：Name{1, 2}
+                    self.advance();
+                    let mut values = Vec::new();
+                    if !self.is_symbol('}') {
+                        loop {
+                            values.push(self.expression(0)?);
+                            if !self.eat_symbol(',') {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect_symbol('}')?;
+                    Ok(Expr::StructInit(name, values))
                 } else {
                     Ok(Expr::Variable(name))
                 }
@@ -1018,58 +1184,177 @@ impl Parser {
         }?;
         let mut expr = expr;
         loop {
-            if self.eat_symbol('[') {
+            if self.is_symbol('[') {
+                self.advance();
+                // 切片：s[a:b]、s[a:]、s[:b]、s[:]
+                // 只要出现 `:` 就按切片解析，否则是普通下标
+                let has_colon = self.scan_to_bracket_end();
+                if has_colon {
+                    let from = if self.is_symbol(':') {
+                        None
+                    } else {
+                        Some(Box::new(self.expression(0)?))
+                    };
+                    self.expect_symbol(':')?;
+                    let to = if self.is_symbol(']') {
+                        None
+                    } else {
+                        Some(Box::new(self.expression(0)?))
+                    };
+                    self.expect_symbol(']')?;
+                    expr = Expr::Slice {
+                        target: Box::new(expr),
+                        from,
+                        to,
+                    };
+                    continue;
+                }
                 let index = self.expression(0)?;
                 self.expect_symbol(']')?;
                 expr = Expr::Index(Box::new(expr), Box::new(index));
             } else if self.eat_symbol('.') {
-                let field = self.ident()?;
-                expr = Expr::Member(Box::new(expr), field);
+                let name = self.ident()?;
+                // obj.method(...) 是方法调用，obj.field 是成员访问
+                if self.is_symbol('(') {
+                    self.advance();
+                    let mut args = Vec::new();
+                    if !self.is_symbol(')') {
+                        loop {
+                            args.push(self.call_argument()?);
+                            if !self.eat_symbol(',') {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect_symbol(')')?;
+                    expr = Expr::MethodCall(Box::new(expr), name, args);
+                } else {
+                    expr = Expr::Member(Box::new(expr), name);
+                }
             } else {
                 break;
             }
         }
         Ok(expr)
     }
+    /// 调用参数：既支持 `value`，也支持 `name = value` 形式。
+/// 命名参数目前只用于 `open(..., encoding = "utf-8")`。
+fn call_argument(&mut self) -> Result<Expr, String> {
+    if self.current_is_ident() {
+        if let (TokenKind::Ident(name), Some(TokenKind::Operator(op))) =
+            (&self.current().kind, self.tokens.get(self.at + 1).map(|t| &t.kind))
+        {
+            if op == "=" {
+                let name = name.clone();
+                self.advance();
+                self.advance();
+                let value = self.expression(0)?;
+                return Ok(Expr::NamedArg(name, Box::new(value)));
+            }
+        }
+    }
+    self.expression(0)
+}
+
+/// 扫描从当前位置到匹配的 `]`...
+fn scan_to_bracket_end(&mut self) -> bool {
+        let start = self.at;
+        let mut depth = 0i32;
+        let mut has_colon = false;
+        while self.at < self.tokens.len() {
+            match &self.tokens[self.at].kind {
+                TokenKind::Symbol('[') | TokenKind::Symbol('(') | TokenKind::Symbol('{') => {
+                    depth += 1
+                }
+                TokenKind::Symbol(']') => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                TokenKind::Symbol(':') if depth == 0 => has_colon = true,
+                TokenKind::Eof => break,
+                _ => {}
+            }
+            self.at += 1;
+        }
+        self.at = start;
+        has_colon
+    }
 }
 
 fn parse_format(raw: &str) -> Result<Vec<FormatPart>, String> {
     let mut parts = Vec::new();
     let mut text = String::new();
-    let mut chars = raw.chars().peekable();
-    while let Some(c) = chars.next() {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
         if c == '{' {
-            if chars.peek() == Some(&'{') {
-                chars.next();
+            if chars.get(i + 1) == Some(&'{') {
                 text.push('{');
+                i += 2;
                 continue;
             }
+            // 扫描到配对的 `}`，期间跳过字符串字面量并跟踪嵌套花括号，
+            // 这样 f"{P{1, 2}}" 里的内层大括号不会被误当作结束符。
+            // 注意起始的 `{` 已在本层处理，所以 depth 从 1 开始。
+            let mut depth = 1i32;
+            let mut in_string: Option<char> = None;
             let mut name = String::new();
-            while let Some(&ch) = chars.peek() {
-                chars.next();
-                if ch == '}' {
-                    break;
+            i += 1;
+            while i < chars.len() {
+                let ch = chars[i];
+                if let Some(quote) = in_string {
+                    name.push(ch);
+                    if ch == '\\' && i + 1 < chars.len() {
+                        name.push(chars[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                    if ch == quote {
+                        in_string = None;
+                    }
+                    i += 1;
+                    continue;
+                }
+                match ch {
+                    '"' | '\'' => in_string = Some(ch),
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
                 }
                 name.push(ch);
+                i += 1;
             }
             if !text.is_empty() {
                 parts.push(FormatPart::Text(std::mem::take(&mut text)));
             }
-            if !name.is_empty() {
-                let tokens = lex(name.trim())?;
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                let tokens = lex(trimmed)?;
                 let mut parser = Parser::new(tokens);
                 let expr = parser.expression(0)?;
                 if !matches!(parser.current().kind, TokenKind::Eof) {
-                    return Err("格式化表达式未完整解析".into());
+                    return Err(format!("格式化表达式未完整解析：`{trimmed}`"));
                 }
                 parts.push(FormatPart::Expr(expr));
             }
-        } else if c == '}' && chars.peek() == Some(&'}') {
-            chars.next();
-            text.push('}');
-        } else {
-            text.push(c);
+            continue;
         }
+        if c == '}' && chars.get(i + 1) == Some(&'}') {
+            text.push('}');
+            i += 2;
+            continue;
+        }
+        text.push(c);
+        i += 1;
     }
     if !text.is_empty() {
         parts.push(FormatPart::Text(text));
@@ -1079,12 +1364,16 @@ fn parse_format(raw: &str) -> Result<Vec<FormatPart>, String> {
 
 #[derive(Clone)]
 struct Binding {
+    /// 由 `:=` 推断得到的类型。显式标注的类型不在此保存，
+    /// 以保持「标注只约束声明处」的历史语义。
+    inferred_type: Option<String>,
     value: Value,
     mutable: bool,
 }
 #[derive(Clone)]
 struct Function {
     params: Vec<(String, Option<String>)>,
+    returns: Option<String>,
     body: Vec<Stmt>,
 }
 enum Flow {
@@ -1130,40 +1419,44 @@ impl Interpreter {
                 mutable,
                 annotation,
                 value,
+                inferred,
             } => {
-                if value.is_none()
-                    && annotation
-                        .as_deref()
-                        .is_some_and(|ty| self.structs.iter().any(|(n, _)| n == ty))
-                {
-                    return Err(format!(
-                        "结构体 `{}` 必须在对象创建时初始化",
-                        annotation.as_deref().unwrap()
-                    ));
-                }
                 let value = if let Some(value) = value {
                     self.eval(value)?
                 } else {
                     Value::Null
                 };
-                self.check_type(annotation.as_deref(), &value)?;
+                // 声明处的类型检查：显式标注或 `:=` 推断都参与
+                let declared: Option<String> = if *inferred {
+                    Some(value_type(&value))
+                } else {
+                    annotation.clone()
+                };
+                if matches!(value, Value::Null)
+                    && declared
+                        .as_deref()
+                        .is_some_and(|ty| self.structs.iter().any(|(n, _)| n == ty))
+                {
+                    return Err(format!(
+                        "结构体 `{}` 必须在对象创建时初始化",
+                        declared.as_deref().unwrap()
+                    ));
+                }
+                self.check_type(declared.as_deref(), &value)?;
+                let binding = Binding {
+                    inferred_type: if *inferred {
+                        Some(value_type(&value))
+                    } else {
+                        None
+                    },
+                    value,
+                    mutable: *mutable,
+                };
                 let globals = self.global_names.last().cloned().unwrap_or_default();
                 if globals.contains(name) {
-                    self.define_global(
-                        name,
-                        Binding {
-                            value,
-                            mutable: *mutable,
-                        },
-                    )?;
+                    self.define_global(name, binding)?;
                 } else {
-                    self.define_local(
-                        name,
-                        Binding {
-                            value,
-                            mutable: *mutable,
-                        },
-                    )?;
+                    self.define_local(name, binding)?;
                 }
             }
             Stmt::Assign { target, value } => {
@@ -1197,7 +1490,12 @@ impl Interpreter {
                     Value::Null
                 }))
             }
-            Stmt::Function { name, params, body } => {
+            Stmt::Function {
+                name,
+                params,
+                returns,
+                body,
+            } => {
                 if self.functions.iter().any(|(n, _)| n == name) {
                     return Err(format!("函数 `{name}` 已定义"));
                 }
@@ -1205,6 +1503,7 @@ impl Interpreter {
                     name.clone(),
                     Function {
                         params: params.clone(),
+                        returns: returns.clone(),
                         body: body.clone(),
                     },
                 ));
@@ -1228,6 +1527,7 @@ impl Interpreter {
                     self.define_global(
                         &instance.name,
                         Binding {
+                            inferred_type: None,
                             value,
                             mutable: true,
                         },
@@ -1472,6 +1772,7 @@ impl Interpreter {
     fn eval(&mut self, expr: &Expr) -> Result<Value, String> {
         match expr {
             Expr::Value(v) => Ok(v.clone()),
+            Expr::NamedArg(_, value) => self.eval(value),
             Expr::Variable(name) => self
                 .lookup(name)
                 .cloned()
@@ -1485,12 +1786,35 @@ impl Interpreter {
                         .ok_or_else(|| "整数溢出".to_owned()),
                     ("-", Value::Float(n)) => Ok(Value::Float(-n)),
                     ("!", Value::Bool(b)) => Ok(Value::Bool(!b)),
+                    ("~", Value::Int(n)) => Ok(Value::Int(!n)),
                     _ => Err(format!("运算符 `{op}` 的操作数类型不正确")),
                 }
             }
             Expr::Prefix(op, expr) => self.eval_update(expr, op, true),
             Expr::Postfix(op, expr) => self.eval_update(expr, op, false),
             Expr::Binary(left, op, right) => {
+                // 短路求值：&& / || 不必计算右侧
+                if op == "&&" || op == "||" {
+                    let a = self.eval(left)?;
+                    let Value::Bool(x) = a else {
+                        return Err(format!(
+                            "运算符 `{op}` 的左侧必须是 bool，收到 `{}`",
+                            value_string(&a)
+                        ));
+                    };
+                    // 左侧已确定结果时跳过右侧
+                    if (op == "&&" && !x) || (op == "||" && x) {
+                        return Ok(Value::Bool(x));
+                    }
+                    let b = self.eval(right)?;
+                    let Value::Bool(y) = b else {
+                        return Err(format!(
+                            "运算符 `{op}` 的右侧必须是 bool，收到 `{}`",
+                            value_string(&b)
+                        ));
+                    };
+                    return Ok(Value::Bool(if op == "&&" { x && y } else { x || y }));
+                }
                 let a = self.eval(left)?;
                 let b = self.eval(right)?;
                 binary(a, op, b)
@@ -1499,6 +1823,47 @@ impl Interpreter {
                 let container = self.eval(container)?;
                 let index = self.eval(index)?;
                 index_value(&container, &index)
+            }
+            Expr::Slice { target, from, to } => {
+                let base = self.eval(target)?;
+                let from = match from {
+                    Some(expr) => Some(self.eval(expr)?),
+                    None => None,
+                };
+                let to = match to {
+                    Some(expr) => Some(self.eval(expr)?),
+                    None => None,
+                };
+                slice_value(&base, from.as_ref(), to.as_ref())
+            }
+            Expr::MethodCall(base, name, args) => {
+                let target = self.eval(base)?;
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    values.push(self.eval(arg)?);
+                }
+                let (result, next_position) = method_call(&target, name, values)?;
+                // 文件写入后推进写入位置，使 r+ 模式下多次 write 顺序追加
+                if let Some(advance) = next_position {
+                    if let Value::File {
+                        path,
+                        mode,
+                        encoding,
+                        position,
+                    } = target
+                    {
+                        self.assign_target(
+                            base,
+                            Value::File {
+                                path,
+                                mode,
+                                encoding,
+                                position: position + advance,
+                            },
+                        )?;
+                    }
+                }
+                Ok(result)
             }
             Expr::Member(base, field) => {
                 let value = self.eval(base)?;
@@ -1555,9 +1920,12 @@ impl Interpreter {
             Expr::Call(name, args) => {
                 if matches!(
                     name.as_str(),
-                    "int" | "float" | "string" | "bool" | "type" | "size"
+                    "int" | "float" | "string" | "bool" | "type" | "size" | "len"
                 ) {
                     return self.eval_builtin(name, args);
+                }
+                if name == "open" {
+                    return self.eval_open(args);
                 }
                 if name == "readln" {
                     if args.len() > 1 {
@@ -1605,6 +1973,7 @@ impl Interpreter {
                     self.define_local(
                         param,
                         Binding {
+                            inferred_type: None,
                             value,
                             mutable: true,
                         },
@@ -1614,11 +1983,24 @@ impl Interpreter {
                 self.scopes.pop();
                 self.global_names.pop();
                 self.call_depth -= 1;
-                match result? {
-                    Flow::Continue => Ok(Value::Null),
-                    Flow::Return(v) => Ok(v),
-                    Flow::Break => Err("break 不在 switch 中".into()),
+                let returned = match result? {
+                    Flow::Continue => {
+                        // 未显式 return：非 void 函数视为缺少返回值
+                        if let Some(ty) = function.returns.as_deref() {
+                            if ty != "void" {
+                                return Err(format!("函数 `{name}` 应返回 `{ty}`"));
+                            }
+                        }
+                        Value::Null
+                    }
+                    Flow::Return(v) => v,
+                    Flow::Break => return Err("break 不在 switch 中".into()),
+                };
+                if let Some(ty) = function.returns.as_deref() {
+                    self.check_type(Some(ty), &returned)
+                        .map_err(|e| format!("函数 `{name}` 返回值：{e}"))?;
                 }
+                Ok(returned)
             }
         }
     }
@@ -1671,17 +2053,35 @@ impl Interpreter {
     fn assign_target(&mut self, target: &Expr, value: Value) -> Result<(), String> {
         match target {
             Expr::Variable(name) => {
+                // 先做类型检查再写入，避免可变借用与&self 冲突
+                {
+                    let Some(binding) = self.lookup_binding(name) else {
+                        return Err(format!("变量 `{name}` 未定义"));
+                    };
+                    if !binding.mutable {
+                        return Err(format!("固定变量 `{name}` 不能重新赋值"));
+                    }
+                    // 只有 `:=` 推断出的类型才约束后续赋值
+                    let inferred = binding.inferred_type.clone();
+                    self.check_type(inferred.as_deref(), &value)
+                        .map_err(|error| format!("变量 `{name}`：{error}"))?;
+                }
                 let Some(binding) = self.lookup_mut(name) else {
                     return Err(format!("变量 `{name}` 未定义"));
                 };
-                if !binding.mutable {
-                    return Err(format!("固定变量 `{name}` 不能重新赋值"));
-                }
                 binding.value = value;
                 Ok(())
             }
             Expr::Member(base, field) => self.assign_member(base, field, value),
-            _ => Err("赋值目标必须是变量或结构体成员".into()),
+            Expr::Index(container_expr, index) => {
+                // 先算出新的容器值，再把容器本身写回其赋值目标。
+                // 这样 l[0][1] = 9、s.field[0] = 9 之类的嵌套路径也能工作。
+                let container = self.eval(container_expr)?;
+                let index = self.eval(index)?;
+                let updated = assign_index(container, index, value)?;
+                self.assign_target(container_expr, updated)
+            }
+            _ => Err("赋值目标必须是变量、结构体成员或下标".into()),
         }
     }
     fn assign_member(&mut self, base: &Expr, field: &str, value: Value) -> Result<(), String> {
@@ -1782,10 +2182,14 @@ impl Interpreter {
         let value = self.eval(&args[0])?;
         match name {
             "type" => Ok(Value::String(value_type(&value))),
-            "size" => match value {
+            "size" | "len" => match value {
                 Value::List(values) => Ok(Value::Int(values.len() as i64)),
                 Value::Dict(entries) => Ok(Value::Int(entries.len() as i64)),
-                _ => Err("size 只能用于列表或字典".into()),
+                Value::String(text) => Ok(Value::Int(text.chars().count() as i64)),
+                _ => Err(format!(
+                    "`{name}` 只能用于列表、字典或字符串，收到 `{}`",
+                    value_string(&value)
+                )),
             },
             "int" => convert_int(value),
             "float" => convert_float(value),
@@ -1793,6 +2197,82 @@ impl Interpreter {
             "bool" => convert_bool(value),
             _ => unreachable!(),
         }
+    }
+    /// open(path, mode, encoding = "utf-8")
+    ///
+    /// 支持 r / w / a / r+ 及其二进制变体。返回值是一个文件句柄，
+    /// 用户视角下当作字符串使用，通过 read / write / writeln / close 操作。
+    fn eval_open(&mut self, args: &[Expr]) -> Result<Value, String> {
+        if args.is_empty() || args.len() > 3 {
+            return Err(format!("`open` 需要 1 到 3 个参数，收到 {} 个", args.len()));
+        }
+        // 先分离位置参数与命名参数
+        let mut positional: Vec<&Expr> = Vec::new();
+        let mut encoding: Option<String> = None;
+        for arg in args {
+            match arg {
+                Expr::NamedArg(key, value) => match key.as_str() {
+                    "encoding" => match self.eval(value)? {
+                        Value::String(e) => encoding = Some(e),
+                        other => {
+                            return Err(format!(
+                                "`encoding` 必须是字符串，收到 `{}`",
+                                value_string(&other)
+                            ))
+                        }
+                    },
+                    other => {
+                        return Err(format!(
+                            "`open` 不支持命名参数 `{other}`，可用：encoding"
+                        ))
+                    }
+                },
+                other => positional.push(other),
+            }
+        }
+        if positional.is_empty() {
+            return Err("`open` 需要路径参数".into());
+        }
+        if positional.len() > 2 {
+            return Err(format!(
+                "`open` 最多接受 2 个位置参数，收到 {} 个",
+                positional.len()
+            ));
+        }
+        let Value::String(path) = self.eval(positional[0])? else {
+            return Err("`open` 的第一个参数必须是路径字符串".into());
+        };
+        let mode = if positional.len() >= 2 {
+            match self.eval(positional[1])? {
+                Value::String(m) => m,
+                other => {
+                    return Err(format!(
+                        "`open` 的模式参数必须是字符串，收到 `{}`",
+                        value_string(&other)
+                    ))
+                }
+            }
+        } else {
+            "r".to_owned()
+        };
+        let valid = ["r", "w", "a", "r+", "rb", "wb", "ab", "rb+", "wb+", "ab+"];
+        if !valid.contains(&mode.as_str()) {
+            return Err(format!(
+                "不支持的文件模式 `{mode}`，可用：{}",
+                valid.join(" / ")
+            ));
+        }
+        let encoding = encoding.unwrap_or_else(|| "utf-8".to_owned());
+        // 检查文件是否存在（只读模式）
+        if !std::path::Path::new(&path).exists() && mode.starts_with('r') {
+            return Err(format!("文件 `{path}` 不存在"));
+        }
+        Ok(Value::File {
+            path,
+            mode,
+            encoding,
+            position: 0,
+        })
     }
     fn define_local(&mut self, name: &str, binding: Binding) -> Result<(), String> {
         let scope = self.scopes.last_mut().unwrap();
@@ -1840,9 +2320,11 @@ impl Interpreter {
         let valid = match ty {
             "int" => matches!(value, Value::Int(_)),
             "float" => matches!(value, Value::Float(_)),
-            "string" => matches!(value, Value::String(_)),
+            "string" => matches!(value, Value::String(_) | Value::File { .. }),
             "bool" => matches!(value, Value::Bool(_)),
             "void" => matches!(value, Value::Null),
+            "list" => matches!(value, Value::List(_)),
+            "dict" => matches!(value, Value::Dict(_)),
             ty if self.structs.iter().any(|(name, _)| name == ty) => {
                 matches!(value, Value::Struct { name, .. } if name == ty)
             }
@@ -1861,6 +2343,58 @@ fn binary(a: Value, op: &str, b: Value) -> Result<Value, String> {
         if let (Value::String(x), Value::String(y)) = (&a, &b) {
             return Ok(Value::String(format!("{x}{y}")));
         }
+    }
+    // 逻辑与/或：短路语义在 eval 层处理，这里只做类型检查与合并
+    if op == "&&" || op == "||" {
+        return match (&a, &b) {
+            (Value::Bool(x), Value::Bool(y)) => Ok(Value::Bool(if op == "&&" {
+                *x && *y
+            } else {
+                *x || *y
+            })),
+            _ => Err(format!(
+                "运算符 `{op}` 只能作用于 bool，收到 `{}` 和 `{}`",
+                value_string(&a),
+                value_string(&b)
+            )),
+        };
+    }
+    // 位运算：仅支持整数
+    if ["&", "|", "^", "<<", ">>"].contains(&op) {
+        return match (&a, &b) {
+            (Value::Int(x), Value::Int(y)) => {
+                let result = match op {
+                    "&" => x & y,
+                    "|" => x | y,
+                    "^" => x ^ y,
+                    "<<" => {
+                        if *y < 0 {
+                            return Err("位移位数不能为负".into());
+                        }
+                        if *y >= 64 {
+                            return Err(format!("位移位数过大 ({y})，最大 63"));
+                        }
+                        x.checked_shl(*y as u32).ok_or("整数溢出")?
+                    }
+                    ">>" => {
+                        if *y < 0 {
+                            return Err("位移位数不能为负".into());
+                        }
+                        if *y >= 64 {
+                            return Err(format!("位移位数过大 ({y})，最大 63"));
+                        }
+                        x >> (*y as u32)
+                    }
+                    _ => unreachable!(),
+                };
+                Ok(Value::Int(result))
+            }
+            _ => Err(format!(
+                "运算符 `{op}` 只能作用于 int，收到 `{}` 和 `{}`",
+                value_string(&a),
+                value_string(&b)
+            )),
+        };
     }
     if ["==", "!=", ">", ">=", "<", "<="].contains(&op) {
         let ordering = match (&a, &b) {
@@ -1893,7 +2427,10 @@ fn binary(a: Value, op: &str, b: Value) -> Result<Value, String> {
             "*" => x.checked_mul(y).map(Value::Int),
             "/" if y != 0 => x.checked_div(y).map(Value::Int),
             "%" if y != 0 => x.checked_rem(y).map(Value::Int),
-            "/" | "%" => return Err("除数不能为零".into()),
+            // 整除：向零截断，与 `/` 语义一致
+            "//" if y != 0 => x.checked_div(y).map(Value::Int),
+            "/" | "%" | "//" => return Err("除数不能为零".into()),
+            "**" => int_pow(x, y),
             _ => None,
         }
         .ok_or_else(|| "整数运算溢出".to_owned()),
@@ -1903,7 +2440,9 @@ fn binary(a: Value, op: &str, b: Value) -> Result<Value, String> {
             "*" => Ok(Value::Float(x * y)),
             "/" if y != 0.0 => Ok(Value::Float(x / y)),
             "%" if y != 0.0 => Ok(Value::Float(x % y)),
-            "/" | "%" => Err("除数不能为零".into()),
+            "//" if y != 0.0 => Ok(Value::Float((x / y).trunc())),
+            "/" | "%" | "//" => Err("除数不能为零".into()),
+            "**" => Ok(Value::Float(x.powf(y))),
             _ => Err(format!("未知运算符 `{op}`")),
         },
         (a, b) => Err(format!(
@@ -1912,6 +2451,22 @@ fn binary(a: Value, op: &str, b: Value) -> Result<Value, String> {
             value_string(&b)
         )),
     }
+}
+
+/// 整数幂。负指数返回 0（与整数语义一致），过大的指数直接报错而不是静默溢出。
+fn int_pow(base: i64, exp: i64) -> Option<Value> {
+    if exp < 0 {
+        return Some(Value::Int(0));
+    }
+    // 2^63 已超出 i64，任何 >= 63 的指数在 base >= 2 时都会溢出
+    if exp >= 63 && base.unsigned_abs() >= 2 {
+        return None;
+    }
+    let mut result: i64 = 1;
+    for _ in 0..exp {
+        result = result.checked_mul(base)?;
+    }
+    Some(Value::Int(result))
 }
 
 fn default_member_value(annotation: Option<&str>) -> Value {
@@ -1934,6 +2489,7 @@ fn value_type(value: &Value) -> String {
         Value::List(_) => "list".into(),
         Value::Dict(_) => "dict".into(),
         Value::Struct { name, .. } => name.clone(),
+        Value::File { path, mode, .. } => format!("<file {path} mode={mode}>"),
     }
 }
 
@@ -1962,6 +2518,16 @@ fn index_value(container: &Value, index: &Value) -> Result<Value, String> {
                 .cloned()
                 .unwrap_or(Value::Int(0)))
         }
+        Value::String(text) => {
+            let chars: Vec<char> = text.chars().collect();
+            let Value::Int(index) = index else {
+                return Err("字符串下标必须是 int".into());
+            };
+            if *index < 0 || *index as usize >= chars.len() {
+                return Err(format!("字符串下标 {index} 越界（长度 {}）", chars.len()));
+            }
+            Ok(Value::String(chars[*index as usize].to_string()))
+        }
         Value::Dict(entries) => {
             for (key, value) in entries {
                 if matches!(binary(key.clone(), "==", index.clone())?, Value::Bool(true)) {
@@ -1970,7 +2536,316 @@ fn index_value(container: &Value, index: &Value) -> Result<Value, String> {
             }
             Ok(Value::Int(0))
         }
-        _ => Err("下标访问只能用于列表或字典".into()),
+        _ => Err("下标访问只能用于列表、字典或字符串".into()),
+    }
+}
+
+/// 字符串切片：s[a:b]、s[a:]、s[:b]、s[:]
+fn slice_value(base: &Value, from: Option<&Value>, to: Option<&Value>) -> Result<Value, String> {
+    let text = match base {
+        Value::String(text) => text,
+        other => {
+            return Err(format!(
+                "切片只能用于字符串，收到 `{}`",
+                value_string(other)
+            ))
+        }
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let to_index = |value: Option<&Value>, default: usize| -> Result<usize, String> {
+        match value {
+            None => Ok(default),
+            Some(Value::Int(n)) => {
+                if *n < 0 {
+                    Err(format!("切片下标不能为负 ({n})"))
+                } else {
+                    Ok(*n as usize)
+                }
+            }
+            Some(other) => Err(format!(
+                "切片下标必须是 int，收到 `{}`",
+                value_string(other)
+            )),
+        }
+    };
+    let start = to_index(from, 0)?.min(chars.len());
+    let end = to_index(to, chars.len())?.min(chars.len());
+    if start > end {
+        return Ok(Value::String(String::new()));
+    }
+    Ok(Value::String(chars[start..end].iter().collect()))
+}
+
+/// 方法调用：str.size()、list.size()、dict.size()、file.read() 等
+///
+/// 返回 `(结果, 文件写入字节数)`。第二个元素仅文件写入时有值，
+/// 用于让调用方把新的写入位置写回句柄。
+fn method_call(
+    target: &Value,
+    name: &str,
+    args: Vec<Value>,
+) -> Result<(Value, Option<usize>), String> {
+    if let Value::File {
+        path,
+        mode,
+        encoding,
+        position,
+    } = target
+    {
+        return file_method(path, mode, encoding, *position, name, args);
+    }
+    match name {
+        "size" => {
+            if !args.is_empty() {
+                return Err(format!("`{name}` 不接受参数"));
+            }
+            let size = match target {
+                Value::List(values) => values.len(),
+                Value::Dict(entries) => entries.len(),
+                Value::String(text) => text.chars().count(),
+                other => {
+                    return Err(format!(
+                        "`size` 只能用于列表、字典或字符串，收到 `{}`",
+                        value_string(other)
+                    ))
+                }
+            };
+            Ok((Value::Int(size as i64), None))
+        }
+        _ => Err(format!("`{}` 不是可用的方法", name)),
+    }
+}
+
+/// 文件句柄方法：read / write / writeln / close
+///
+/// 返回 `(结果, 写入字节数)`，后者供调用方推进句柄位置。
+fn file_method(
+    path: &str,
+    mode: &str,
+    encoding: &str,
+    position: usize,
+    name: &str,
+    args: Vec<Value>,
+) -> Result<(Value, Option<usize>), String> {
+    match name {
+        "read" => {
+            if !args.is_empty() {
+                return Err("`read` 不接受参数".into());
+            }
+            if mode == "w" || mode == "a" {
+                return Err(format!("`{mode}` 模式只能写入，不能读取"));
+            }
+            let bytes =
+                std::fs::read(path).map_err(|e| format!("读取 `{path}` 失败：{e}"))?;
+            Ok((Value::String(decode_text(&bytes, encoding)), None))
+        }
+        "write" => {
+            if args.len() != 1 {
+                return Err("`write` 需要 1 个参数".into());
+            }
+            let bytes = value_to_bytes(&args[0], encoding)?;
+            append_or_write(path, mode, &bytes, position)?;
+            Ok((Value::Int(bytes.len() as i64), Some(bytes.len())))
+        }
+        "writeln" => {
+            // writeln 接受字符串或字符串列表
+            if args.len() != 1 {
+                return Err("`writeln` 需要 1 个参数".into());
+            }
+            let text = match &args[0] {
+                Value::String(s) => s.clone(),
+                Value::List(items) => {
+                    let mut joined = String::new();
+                    for item in items {
+                        let Value::String(s) = item else {
+                            return Err("`writeln` 的列表元素必须是字符串".into());
+                        };
+                        joined.push_str(s);
+                    }
+                    joined
+                }
+                other => {
+                    return Err(format!(
+                        "`writeln` 需要字符串或字符串列表，收到 `{}`",
+                        value_string(other)
+                    ))
+                }
+            };
+            let mut bytes = encode_text(&text, encoding);
+            // 末尾没有换行时补一个
+            if !text.ends_with('\n') {
+                bytes.extend_from_slice(&encode_text("\n", encoding));
+            }
+            append_or_write(path, mode, &bytes, position)?;
+            Ok((Value::Int(bytes.len() as i64), Some(bytes.len())))
+        }
+        "close" => Ok((Value::Null, None)),
+        other => Err(format!("`{other}` 不是文件方法")),
+    }
+}
+
+fn append_or_write(path: &str, mode: &str, bytes: &[u8], position: usize) -> Result<(), String> {
+    use std::io::Write;
+    match mode {
+        "a" | "ab" => {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(path)
+                .map_err(|e| format!("打开 `{path}` 失败：{e}"))?;
+            file.write_all(bytes)
+                .map_err(|e| format!("写入 `{path}` 失败：{e}"))
+        }
+        "r+" | "rb+" => {
+            // 读写模式：从当前位置写入，不清空原内容
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(path)
+                .map_err(|e| format!("打开 `{path}` 失败：{e}"))?;
+            use std::io::Seek;
+            file.seek(std::io::SeekFrom::Start(position as u64))
+                .map_err(|e| format!("定位 `{path}` 失败：{e}"))?;
+            file.write_all(bytes)
+                .map_err(|e| format!("写入 `{path}` 失败：{e}"))
+        }
+        _ => {
+            // w / wb：截断后写入
+            let mut file = std::fs::File::create(path)
+                .map_err(|e| format!("写入 `{path}` 失败：{e}"))?;
+            file.write_all(bytes)
+                .map_err(|e| format!("写入 `{path}` 失败：{e}"))
+        }
+    }
+}
+
+/// 把值编码为字节：字符串按指定编码，列表视为字节序列
+fn value_to_bytes(value: &Value, encoding: &str) -> Result<Vec<u8>, String> {
+    match value {
+        Value::String(text) => Ok(encode_text(text, encoding)),
+        Value::List(items) => {
+            let mut bytes = Vec::with_capacity(items.len());
+            for item in items {
+                let Value::Int(n) = item else {
+                    return Err("写入二进制时列表元素必须是 int".into());
+                };
+                if !(0..=255).contains(n) {
+                    return Err(format!("字节值必须在 0 到 255 之间，收到 {n}"));
+                }
+                bytes.push(*n as u8);
+            }
+            Ok(bytes)
+        }
+        other => Err(format!(
+            "`write` 需要字符串或字节列表，收到 `{}`",
+            value_string(other)
+        )),
+    }
+}
+
+fn encode_text(text: &str, encoding: &str) -> Vec<u8> {
+    match encoding.to_ascii_lowercase().replace('-', "") {
+        e if e == "utf8" => text.as_bytes().to_vec(),
+        e if e == "ascii" => text
+            .chars()
+            .map(|c| if c.is_ascii() { c as u8 } else { b'?' })
+            .collect(),
+        e if e == "gbk" || e == "gb2312" || e == "gb18030" => text
+            .chars()
+            .flat_map(|c| {
+                // 简化实现：非 ASCII 字符用 UTF-8 字节代替
+                if c.is_ascii() {
+                    vec![c as u8]
+                } else {
+                    let mut buf = [0u8; 4];
+                    c.encode_utf8(&mut buf).as_bytes().to_vec()
+                }
+            })
+            .collect(),
+        e if e == "latin1" || e == "iso88591" => text
+            .chars()
+            .map(|c| if (c as u32) < 256 { c as u8 } else { b'?' })
+            .collect(),
+        _ => text.as_bytes().to_vec(),
+    }
+}
+
+fn decode_text(bytes: &[u8], encoding: &str) -> String {
+    match encoding.to_ascii_lowercase().replace('-', "") {
+        e if e == "latin1" || e == "iso88591" => {
+            bytes.iter().map(|&b| b as char).collect()
+        }
+        e if e == "ascii" => bytes
+            .iter()
+            .map(|&b| if b.is_ascii() { b as char } else { '\u{FFFD}' })
+            .collect(),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// 写入列表或字典的某个位置，返回更新后的容器。
+/// 列表允许下标等于长度时追加，超过则报错；字典允许新增键。
+fn assign_index(container: Value, index: Value, value: Value) -> Result<Value, String> {
+    match container {
+        Value::List(mut values) => {
+            let Value::Int(position) = index else {
+                return Err("列表下标必须是 int".into());
+            };
+            if position < 0 {
+                return Err(format!("列表下标不能为负 ({position})"));
+            }
+            let position = position as usize;
+            if position < values.len() {
+                values[position] = value;
+            } else if position == values.len() {
+                values.push(value);
+            } else {
+                return Err(format!(
+                    "列表下标 {position} 越界（当前长度 {}，只能在末尾追加）",
+                    values.len()
+                ));
+            }
+            Ok(Value::List(values))
+        }
+        Value::String(text) => {
+            let Value::String(replacement) = value else {
+                return Err("字符串下标赋值必须赋一个字符串".into());
+            };
+            let replacement: Vec<char> = replacement.chars().collect();
+            if replacement.len() != 1 {
+                return Err(format!(
+                    "字符串下标赋值要求恰好 1 个字符，收到 {} 个",
+                    replacement.len()
+                ));
+            }
+            let Value::Int(position) = index else {
+                return Err("字符串下标必须是 int".into());
+            };
+            let mut chars: Vec<char> = text.chars().collect();
+            if position < 0 || position as usize >= chars.len() {
+                return Err(format!(
+                    "字符串下标 {position} 越界（长度 {}）",
+                    chars.len()
+                ));
+            }
+            chars[position as usize] = replacement[0];
+            Ok(Value::String(chars.into_iter().collect()))
+        }
+        Value::Dict(mut entries) => {
+            for entry in entries.iter_mut() {
+                if matches!(binary(entry.0.clone(), "==", index.clone())?, Value::Bool(true)) {
+                    entry.1 = value;
+                    return Ok(Value::Dict(entries));
+                }
+            }
+            entries.push((index, value));
+            Ok(Value::Dict(entries))
+        }
+        other => Err(format!(
+            "下标赋值只能用于列表或字典，收到 `{}`",
+            value_string(&other)
+        )),
     }
 }
 
@@ -2009,7 +2884,7 @@ fn convert_int(value: Value) -> Result<Value, String> {
             }
         }
         Value::Null => Ok(Value::Int(0)),
-        Value::List(_) | Value::Dict(_) | Value::Struct { .. } => unreachable!(),
+        Value::List(_) | Value::Dict(_) | Value::Struct { .. } | Value::File { .. } => unreachable!(),
     }
 }
 
@@ -2024,7 +2899,7 @@ fn convert_float(value: Value) -> Result<Value, String> {
             .map(Value::Float)
             .map_err(|_| "字符串无法转换为 float".into()),
         Value::Null => Ok(Value::Float(0.0)),
-        Value::List(_) | Value::Dict(_) | Value::Struct { .. } => unreachable!(),
+        Value::List(_) | Value::Dict(_) | Value::Struct { .. } | Value::File { .. } => unreachable!(),
     }
 }
 
@@ -2041,7 +2916,7 @@ fn convert_bool(value: Value) -> Result<Value, String> {
         Value::Float(n) => Ok(Value::Bool(n != 0.0)),
         Value::String(s) => Ok(Value::Bool(!s.is_empty())),
         Value::Null => Ok(Value::Bool(false)),
-        Value::List(_) | Value::Dict(_) | Value::Struct { .. } => unreachable!(),
+        Value::List(_) | Value::Dict(_) | Value::Struct { .. } | Value::File { .. } => unreachable!(),
     }
 }
 
@@ -2077,6 +2952,7 @@ fn value_string(v: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        Value::File { path, .. } => path.clone(),
     }
 }
 
@@ -2115,7 +2991,7 @@ mod tests {
 
     #[test]
     fn parses_example_features() {
-        let src = r#"let int fixed = 1; var int count = 2; fn int add(int a, int b) { return(a + b); } println(f"{fixed}{add(count, 3)}");"#;
+        let src = r#"let fixed : int = 1; var count : int = 2; fn add(a : int, b : int) -> int { return(a + b); } println(f"{fixed}{add(count, 3)}");"#;
         let tokens = lex(src).unwrap();
         assert!(Parser::new(tokens).program().is_ok());
     }
@@ -2136,7 +3012,7 @@ mod tests {
 
     #[test]
     fn evaluates_function_and_mutable_variable() {
-        let src = "var int n = 1; fn int inc(int x) { return(x + 1); } n = inc(n); println(n);";
+        let src = "var n : int = 1; fn inc(x : int) -> int { return(x + 1); } n = inc(n); println(n);";
         let ast = Parser::new(lex(src).unwrap()).program().unwrap();
         let mut interpreter = Interpreter::new();
         assert!(interpreter.run(&ast).is_ok());
@@ -2167,12 +3043,12 @@ mod tests {
     #[test]
     fn evaluates_if_and_recursive_fibonacci() {
         let src = r#"
-            fn int fibonacci(n) {
+            fn fibonacci(n : int) -> int {
                 if (n <= 0) { return(0); }
                 elif (n == 1) { return(1); }
                 else { return(fibonacci(n - 1) + fibonacci(n - 2)); }
             }
-            let int result = if (fibonacci(5) == 5) { 10 } else { 20 };
+            let result : int = if (fibonacci(5) == 5) { 10 } else { 20 };
         "#;
         let ast = Parser::new(lex(src).unwrap()).program().unwrap();
         let mut interpreter = Interpreter::new();
@@ -2431,17 +3307,17 @@ mod tests {
     fn accesses_struct_instance_from_function() {
         let src = r#"
             struct student {
-                var int id;
-                var int age;
-                var string name;
+                var id : int;
+                var age : int;
+                var name : string;
             } s;
-            fn int main() {
+            fn main() -> int {
                 s.id = 7;
                 s.age = 8;
                 s.name = "Ann";
                 return(s.id + s.age);
             }
-            var int result = main();
+            var result : int = main();
         "#;
         let ast = Parser::new(lex(src).unwrap()).program().unwrap();
         let mut interpreter = Interpreter::new();
@@ -2491,9 +3367,731 @@ mod tests {
 
     #[test]
     fn requires_semicolon_after_struct_instance_declaration() {
-        let error = Parser::new(lex("struct a { var int x; } s").unwrap())
+        let error = Parser::new(lex("struct a { var x : int; } s").unwrap())
             .program()
             .unwrap_err();
         assert!(error.contains("`;`"), "unexpected error: {error}");
     }
+
+    #[test]
+    fn parses_trailing_type_annotation() {
+        let src = r#"
+            var n : int = 5;
+            let s : string = "A";
+            var f : float = 1.5;
+            var b : bool = true;
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("n"), Some(Value::Int(5))));
+        assert!(matches!(
+            interpreter.lookup("s"),
+            Some(Value::String(v)) if v == "A"
+        ));
+        assert!(matches!(interpreter.lookup("f"), Some(Value::Float(_))));
+        assert!(matches!(interpreter.lookup("b"), Some(Value::Bool(true))));
+    }
+
+    #[test]
+    fn infers_type_with_walrus_operator() {
+        let src = r#"
+            var x := 5;
+            var name := "Khyept";
+            var pi := 3.5;
+            var flag := false;
+            var inferred_type := type(x);
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("x"), Some(Value::Int(5))));
+        assert!(matches!(
+            interpreter.lookup("name"),
+            Some(Value::String(v)) if v == "Khyept"
+        ));
+        assert!(matches!(
+            interpreter.lookup("inferred_type"),
+            Some(Value::String(v)) if v == "int"
+        ));
+    }
+
+    #[test]
+    fn walrus_inferred_type_is_enforced_on_reassignment() {
+        let src = r#"
+            var x := 5;
+            x = 10;
+            x = "boom";
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        let error = interpreter.run(&ast).unwrap_err();
+        assert!(error.contains("类型 `int`"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn parses_function_with_trailing_return_type() {
+        let src = r#"
+            fn add(a : int, b : int) -> int { return(a + b); }
+            var sum : int = add(3, 4);
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("sum"), Some(Value::Int(7))));
+    }
+
+    #[test]
+    fn function_without_return_type_defaults_to_void() {
+        // 不写-> 时默认 void，函数体内的 return 值不参与调用结果
+        let src = r#"
+            fn nothing() { println("hi"); }
+            nothing();
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        assert!(interpreter.run(&ast).is_ok());
+    }
+
+    #[test]
+    fn enforces_declared_function_return_type() {
+        let src = r#"
+            fn bad() -> int { return("not an int"); }
+            var r = bad();
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        let error = interpreter.run(&ast).unwrap_err();
+        assert!(error.contains("返回值"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn reports_missing_return_for_non_void_function() {
+        let src = r#"
+            fn missing() -> int { println("no return"); }
+            var r = missing();
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        let error = interpreter.run(&ast).unwrap_err();
+        assert!(error.contains("应返回"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn keeps_legacy_prefixed_type_syntax_working() {
+        // 旧写法应继续可用，避免一次性破坏现有代码
+        let src = r#"
+            var int n = 5;
+            fn int twice(int x) { return(x * 2); }
+            var int r = twice(n);
+            struct P { var int x; var int y; } p{1, 2};
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("r"), Some(Value::Int(10))));
+    }
+
+    #[test]
+    fn parses_trailing_type_in_struct_fields() {
+        let src = r#"
+            struct student {
+                var id : int;
+                let name : string;
+            } s;
+            s.id = 3;
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(
+            interpreter.lookup("s"),
+            Some(Value::Struct { fields, .. })
+                if matches!(&fields[0].value, Value::Int(3))
+                    && matches!(&fields[1].value, Value::String(_))
+        ));
+    }
+
+    #[test]
+    fn assigns_to_list_element() {
+        let src = r#"
+            var l : list = [0, 1, 2, 3];
+            l[1] = 2;
+            var r = l[1];
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("r"), Some(Value::Int(2))));
+        assert!(matches!(
+            interpreter.lookup("l"),
+            Some(Value::List(v)) if v == &vec![
+                Value::Int(0),
+                Value::Int(2),
+                Value::Int(2),
+                Value::Int(3)
+            ]
+        ));
+    }
+
+    #[test]
+    fn appends_to_list_via_index_equal_to_length() {
+        let src = r#"
+            var l : list = [1, 2];
+            l[size(l)] = 3;
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(
+            interpreter.lookup("l"),
+            Some(Value::List(v))
+                if v == &vec![Value::Int(1), Value::Int(2), Value::Int(3)]
+        ));
+    }
+
+    #[test]
+    fn rejects_out_of_order_list_index_assignment() {
+        let src = r#"
+            var l : list = [1, 2];
+            l[5] = 9;
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        let error = interpreter.run(&ast).unwrap_err();
+        assert!(error.contains("越界"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn assigns_into_nested_containers() {
+        let src = r#"
+            var g : list = [[0, 0], [0, 0]];
+            g[0][1] = 5;
+            g[1][0] = 7;
+            var d : dict = {"a": 1};
+            d["a"] = 10;
+            d["b"] = 20;
+            var new_key = d["b"];
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("new_key"), Some(Value::Int(20))));
+        let Value::List(rows) = interpreter.lookup("g").unwrap() else {
+            panic!("expected list");
+        };
+        let Value::List(first) = &rows[0] else {
+            panic!("expected list");
+        };
+        assert!(matches!(&first[1], Value::Int(5)));
+        assert!(matches!(interpreter.lookup("d"), Some(Value::Dict(e)) if e.len() == 2));
+    }
+
+    #[test]
+    fn evaluates_logical_operators() {
+        let src = r#"
+            var a := 5;
+            var b := 7;
+            var both = a == 5 && b == 7;
+            var either = a == 99 || b == 7;
+            var neither = !(a == 5) && !(b == 7);
+            var negated = !false;
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("both"), Some(Value::Bool(true))));
+        assert!(matches!(
+            interpreter.lookup("either"),
+            Some(Value::Bool(true))
+        ));
+        assert!(matches!(
+            interpreter.lookup("neither"),
+            Some(Value::Bool(false))
+        ));
+        assert!(matches!(
+            interpreter.lookup("negated"),
+            Some(Value::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn short_circuits_logical_operators() {
+        // 右侧若是会出错的表达式，短路时不应被求值
+        let src = r#"
+            var x := 0;
+            if (x == 1 && 5 > 3) { println("no"); }
+            if (x == 0 || 5 > 3) println("yes");
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        assert!(interpreter.run(&ast).is_ok());
+    }
+
+    #[test]
+    fn rejects_non_bool_operands_for_logical_operators() {
+        let ast = Parser::new(lex("var a := 1; var r = a && true;").unwrap())
+            .program()
+            .unwrap();
+        let mut interpreter = Interpreter::new();
+        let error = interpreter.run(&ast).unwrap_err();
+        assert!(error.contains("bool"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn accepts_single_statement_body_without_braces() {
+        let src = r#"
+            var a := 5;
+            if (a == 5) println("a5");
+            if (a == 99) println("no"); else println("else branch");
+            var i := 0;
+            while (i < 3) i++;
+            var total = i;
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("total"), Some(Value::Int(3))));
+    }
+
+    #[test]
+    fn evaluates_extended_operators() {
+        let src = r#"
+            var div = 7 // 2;
+            var rem = 7 % 2;
+            var pow = 2 ** 3;
+            var band = 5 & 3;
+            var bor = 5 | 3;
+            var bxor = 5 ^ 3;
+            var bnot = ~5;
+            var shl = 5 << 1;
+            var shr = 5 >> 1;
+            var right_assoc = 2 ** 3 ** 2;
+            var fdiv = 7.0 // 2.0;
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        let expected: &[(&str, i64)] = &[
+            ("div", 3),
+            ("rem", 1),
+            ("pow", 8),
+            ("band", 1),
+            ("bor", 7),
+            ("bxor", 6),
+            ("bnot", -6),
+            ("shl", 10),
+            ("shr", 2),
+            ("right_assoc", 512),
+        ];
+        for (name, value) in expected {
+            assert!(
+                matches!(interpreter.lookup(name), Some(Value::Int(v)) if *v == *value),
+                "{name} should be {value}"
+            );
+        }
+        assert!(matches!(
+            interpreter.lookup("fdiv"),
+            Some(Value::Float(v)) if *v == 3.0
+        ));
+    }
+
+    #[test]
+    fn distinguishes_floor_division_from_line_comment() {
+        let src = r#"
+            var a := 7;
+            var q = a // 2;   /// 这是行尾注释
+            var b := 1;
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("q"), Some(Value::Int(3))));
+        assert!(matches!(interpreter.lookup("b"), Some(Value::Int(1))));
+    }
+
+    #[test]
+    fn rejects_bitwise_operators_on_floats() {
+        let ast = Parser::new(lex("var r = 1.5 & 2;").unwrap())
+            .program()
+            .unwrap();
+        let mut interpreter = Interpreter::new();
+        let error = interpreter.run(&ast).unwrap_err();
+        assert!(error.contains("int"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn rejects_division_by_zero_for_floor_division() {
+        let ast = Parser::new(lex("var r = 7 // 0;").unwrap())
+            .program()
+            .unwrap();
+        let mut interpreter = Interpreter::new();
+        let error = interpreter.run(&ast).unwrap_err();
+        assert!(error.contains("除数不能为零"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn triple_slash_is_line_comment_and_slash_slash_is_division() {
+        // `///` 是行注释，`//` 是整除，两者不再有歧义
+        let src = r#"
+            /// 这一行是中文注释，含全角标点：，、（）
+            fn f() {
+                println("hi");
+            }
+            var a := 7 // 2;
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("a"), Some(Value::Int(3))));
+    }
+
+    #[test]
+    fn skips_text_after_triple_slash_comment() {
+        // 注释里的 // 与引号都不应影响后续解析
+        let src = r#"
+            /// 这里写了 // 甚至 "引号" 也不影响
+            var a := 1;
+            var b := 2;
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("a"), Some(Value::Int(1))));
+        assert!(matches!(interpreter.lookup("b"), Some(Value::Int(2))));
+    }
+
+    #[test]
+    fn parses_block_comments() {
+        let src = r#"
+            /*
+             * 多行块注释
+             * 里面可以有 // 和 ** 各种符号
+             */
+            var a := 1;
+            var b := /* 行内块注释 */ 2;
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("a"), Some(Value::Int(1))));
+        assert!(matches!(interpreter.lookup("b"), Some(Value::Int(2))));
+    }
+
+    #[test]
+    fn rejects_unclosed_block_comment() {
+        let error = lex("/* 没有闭合\nvar a := 1;").unwrap_err();
+        assert!(error.contains("未闭合"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn floor_division_after_parenthesized_operand() {
+        let src = r#"
+            var a := (7);
+            var q = a // 2;
+            var b := (3 + 4) // 2;
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("q"), Some(Value::Int(3))));
+        assert!(matches!(interpreter.lookup("b"), Some(Value::Int(3))));
+    }
+
+    #[test]
+    fn double_slash_alone_is_a_syntax_error() {
+        // 只有两个斜杠时是整除运算符，后面缺少操作数应报错
+        let error = Parser::new(lex("var a := 1 // ;").unwrap())
+            .program()
+            .unwrap_err();
+        assert!(!error.is_empty());
+    }
+
+    #[test]
+    fn constructs_struct_with_expression_syntax() {
+        let src = r#"
+            struct P { var x : int; var y : string; }
+
+            var a = P{1, "one"};
+            var b : P = P{2, "two"};
+            struct Q { var n : int; }
+            var c : Q = Q{9};
+            var total = a.x + b.x + c.n;
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("total"), Some(Value::Int(12))));
+        assert!(matches!(
+            interpreter.lookup("a"),
+            Some(Value::Struct { fields, .. })
+                if matches!(&fields[0].value, Value::Int(1))
+                    && matches!(&fields[1].value, Value::String(v) if v == "one")
+        ));
+    }
+
+    #[test]
+    fn indexes_and_slices_strings() {
+        let src = r#"
+            var s : string = "Hello, World!";
+            s[0] = "h";
+            var first = s[0];
+            var tail = s[1:];
+            var head = s[:5];
+            var mid = s[0:5];
+            var last = s[7:];
+            var whole = s[:];
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(
+            interpreter.lookup("s"),
+            Some(Value::String(v)) if v == "hello, World!"
+        ));
+        assert!(matches!(
+            interpreter.lookup("first"),
+            Some(Value::String(v)) if v == "h"
+        ));
+        assert!(matches!(
+            interpreter.lookup("tail"),
+            Some(Value::String(v)) if v == "ello, World!"
+        ));
+        assert!(matches!(
+            interpreter.lookup("head"),
+            Some(Value::String(v)) if v == "hello"
+        ));
+        assert!(matches!(
+            interpreter.lookup("last"),
+            Some(Value::String(v)) if v == "World!"
+        ));
+        assert!(matches!(
+            interpreter.lookup("whole"),
+            Some(Value::String(v)) if v == "hello, World!"
+        ));
+    }
+
+    #[test]
+    fn rejects_out_of_range_string_index() {
+        let ast = Parser::new(lex("var s := \"ab\"; s[5] = \"x\";").unwrap())
+            .program()
+            .unwrap();
+        let mut interpreter = Interpreter::new();
+        let error = interpreter.run(&ast).unwrap_err();
+        assert!(error.contains("越界"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn counts_length_with_len_and_size() {
+        let src = r#"
+            var s := "Hello, World!";
+            var l : list = [1, 2, 3];
+            var d : dict = {"a": 1, "b": 2};
+            var ls = len(s);
+            var ss = s.size();
+            var ll = len(l);
+            var ls2 = l.size();
+            var dl = len(d);
+            var ds = d.size();
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        for (name, want) in [
+            ("ls", 13),
+            ("ss", 13),
+            ("ll", 3),
+            ("ls2", 3),
+            ("dl", 2),
+            ("ds", 2),
+        ] {
+            assert!(
+                matches!(interpreter.lookup(name), Some(Value::Int(v)) if *v == want),
+                "{name} should be {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_and_writes_files() {
+        let dir = std::env::temp_dir().join("khyept_file_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.txt");
+        let path_str = path.to_string_lossy().replace('\\', "\\\\");
+        let src = format!(
+            r#"
+            var f = open("{path_str}", "w", encoding="utf-8");
+            f.write("Hello, World!");
+            f.close();
+
+            var g = open("{path_str}", "r");
+            var content : string = g.read();
+            g.close();
+
+            var h = open("{path_str}", "a");
+            h.write("\nsecond line");
+            h.close();
+
+            var i2 = open("{path_str}", "r");
+            var full : string = i2.read();
+            i2.close();
+            "#
+        );
+        let ast = Parser::new(lex(&src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(
+            interpreter.lookup("content"),
+            Some(Value::String(v)) if v == "Hello, World!"
+        ));
+        assert!(matches!(
+            interpreter.lookup("full"),
+            Some(Value::String(v)) if v == "Hello, World!\nsecond line"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_write_mode_overwrites_in_place() {
+        let dir = std::env::temp_dir().join("khyept_rplus_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rplus.txt");
+        let path_str = path.to_string_lossy().replace('\\', "\\\\");
+        let src = format!(
+            r#"
+            var f = open("{path_str}", "w");
+            f.write("Hello World");
+            f.close();
+
+            var g = open("{path_str}", "r+");
+            var before : string = g.read();
+            g.write("ABC");
+            g.close();
+
+            var h = open("{path_str}", "r");
+            var after : string = h.read();
+            h.close();
+            "#
+        );
+        let ast = Parser::new(lex(&src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(
+            interpreter.lookup("before"),
+            Some(Value::String(v)) if v == "Hello World"
+        ));
+        assert!(matches!(
+            interpreter.lookup("after"),
+            Some(Value::String(v)) if v == "ABClo World"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn writes_multiple_lines_and_binary_bytes() {
+        let dir = std::env::temp_dir().join("khyept_multi_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let txt = dir.join("lines.txt");
+        let bin = dir.join("data.bin");
+        let txt_str = txt.to_string_lossy().replace('\\', "\\\\");
+        let bin_str = bin.to_string_lossy().replace('\\', "\\\\");
+        let src = format!(
+            r#"
+            var lines := ["first\n", "second\n"];
+            var f = open("{txt_str}", "w");
+            f.writeln(lines);
+            f.close();
+
+            var g = open("{txt_str}", "r");
+            var text : string = g.read();
+            g.close();
+
+            var data : list = [0, 1, 2, 255];
+            var b = open("{bin_str}", "wb");
+            b.write(data);
+            b.close();
+            var raw = open("{bin_str}", "rb");
+            var bytes : string = raw.read();
+            raw.close();
+            var byte_len = len(bytes);
+            "#
+        );
+        let ast = Parser::new(lex(&src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(
+            interpreter.lookup("text"),
+            Some(Value::String(v)) if v == "first\nsecond\n"
+        ));
+        assert!(matches!(
+            interpreter.lookup("byte_len"),
+            Some(Value::Int(4))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_missing_file_in_read_mode() {
+        let ast =
+            Parser::new(lex("var f = open(\"definitely_missing_file_xyz.txt\", \"r\");").unwrap())
+                .program()
+                .unwrap();
+        let mut interpreter = Interpreter::new();
+        let error = interpreter.run(&ast).unwrap_err();
+        assert!(error.contains("不存在"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn rejects_invalid_file_mode() {
+        let ast = Parser::new(lex("var f = open(\"x.txt\", \"q\");").unwrap())
+            .program()
+            .unwrap();
+        let mut interpreter = Interpreter::new();
+        let error = interpreter.run(&ast).unwrap_err();
+        assert!(error.contains("模式"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn parses_struct_initializer_inside_fstring() {
+        let src = r#"
+            struct P { var x : int; }
+            var a = P{7};
+            var text = f"{P{1}}";
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("a"), Some(Value::Struct { .. })));
+        assert!(matches!(
+            interpreter.lookup("text"),
+            Some(Value::String(v)) if v.contains('1')
+        ));
+    }
+
+    #[test]
+    fn parses_named_argument_in_open() {
+        let dir = std::env::temp_dir().join("khyept_named_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("n.txt");
+        let path_str = path.to_string_lossy().replace('\\', "\\\\");
+        let src = format!(
+            r#"
+            var f = open("{path_str}", "w", encoding="utf-8");
+            f.write("ok");
+            f.close();
+            var g = open("{path_str}", "r", encoding="utf-8");
+            var text : string = g.read();
+            g.close();
+            "#
+        );
+        let ast = Parser::new(lex(&src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(
+            interpreter.lookup("text"),
+            Some(Value::String(v)) if v == "ok"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
+

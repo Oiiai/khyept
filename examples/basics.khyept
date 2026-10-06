@@ -1,22 +1,22 @@
 /// Khyept 示例
-let int num = 123;
-var int num1 = 123;
+let num : int = 123;
+var num1 : int = 123;
 num1 = 456;
 println(f"num={num}, num1={num1}");
 
-fn int add(int a, int b) {
+fn add(a : int, b : int) -> int {
     return(a + b);
 }
 
-fn void main() {
-    var int result = add(num, num1);
+fn main() {
+    var result : int = add(num, num1);
     println(f"result={result}");
-    let string name = readln("请输入名字: ");
+    let name : string = readln("请输入名字: ");
     println(f"你好，{name}!");
 }
 
 main();
 
-let int age = 20;
-let string category = if (age >= 18) { "adult" } else { "minor" };
+let age : int = 20;
+let category : string = if (age >= 18) { "adult" } else { "minor" };
 println(category);

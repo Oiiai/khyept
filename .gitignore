@@ -5,3 +5,7 @@
 vscode-khyept/.vsix-stage/
 vscode-khyept/\[Content_Types\].xml
 vscode-khyept/extension.vsixmanifest
+/123.md
+/migrate_examples.py
+/migrate_comments.py
+*.sh text eol=lf

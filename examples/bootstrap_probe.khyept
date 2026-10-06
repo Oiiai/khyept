@@ -1,0 +1,99 @@
+/// 自举可行性验证：Khyept 距离自举还有多远
+///
+/// 这个程序用实际可运行的代码验证「解释器的核心数据结构」能否用 Khyept 表达，
+/// 并在最后列出仍缺失的语言能力。
+
+/// 递归下降解析器：表达式 -> 项 -> 因子
+/// 已验证：函数分层可以表达优先级，递归可以下降
+
+var tokens : list = [];
+var cursor := 0;
+
+fn parse_expr() -> int {
+    var lhs := parse_term();
+    while (true) {
+        if (cursor >= size(tokens)) { return(lhs); }
+        if (tokens[cursor] == "+") {
+            cursor++;
+            var rhs := parse_term();
+            lhs = lhs + rhs;
+        } else {
+            return(lhs);
+        }
+    }
+}
+
+fn parse_term() -> int {
+    var lhs := parse_factor();
+    while (true) {
+        if (cursor >= size(tokens)) { return(lhs); }
+        if (tokens[cursor] == "*") {
+            cursor++;
+            var rhs := parse_factor();
+            lhs = lhs * rhs;
+        } else {
+            return(lhs);
+        }
+    }
+}
+
+fn parse_factor() -> int {
+    var value := int(tokens[cursor]);
+    cursor++;
+    return(value);
+}
+
+/// 字典当符号表，列表当栈
+var symbols : dict = {};
+symbols["x"] = 10;
+symbols["y"] = 32;
+
+var stack : list = [];
+stack[0] = 10;
+stack[1] = 20;
+stack[size(stack)] = 30;
+
+println("=== 已验证可用的自举基础能力 ===");
+/// 用例 2 + 3 * 4：若优先级失效会算成 20，正确的是 14
+tokens[0] = "2";
+tokens[1] = "+";
+tokens[2] = "3";
+tokens[3] = "*";
+tokens[4] = "4";
+cursor = 0;
+var result := parse_expr();
+println(f"1. 递归下降解析 2 + 3 * 4 = {result}，优先级正确：{result == 14}");
+println(f"2. 字典当符号表，size = {size(symbols)}");
+println(f"3. 列表当栈，size = {size(stack)}");
+println("4. 字符串比较可区分运算符与数字");
+println("5. 控制流完整：if / while / for / switch / break");
+println("");
+
+println("=== 关键缺口 ===");
+println("A. 无文件 IO，读不到自己的源码，这是最硬的墙");
+println("B. 字符串不能下标访问，也没有截取子串的能力");
+println("   而词法分析器的本质就是逐字符扫描字符串");
+println("C. 无字符转码点函数，ASCII 判断可用但无法处理 Unicode");
+println("D. 结构体只能声明式构造，无法在运行时动态创建");
+println("   这对自举是硬限制，因为 AST 节点必须按需生成");
+println("E. 单文件、无模块系统，3000 行级别的解释器难以组织");
+println("F. 函数不能当值，没有一等函数与回调");
+println("   递归下降里若有 map 之类的回调就得改写");
+println("G. 没有异常机制，出错直接终止整个程序");
+println("   解释器无法捕获并恢复，词法阶段的错误处理会很难写");
+println("H. 递归深度上限 256，实测 200 层可行、300 层报错");
+println("   真实解释器解析深层嵌套表达式容易超过这个数");
+println("");
+
+println("=== 综合判断 ===");
+println("写玩具解释器：可以，补 5 到 8 个小能力即可");
+println("  例如只支持加减乘的算术解释器，约 200 行 Khyept");
+println("");
+println("自举完整 Khyept：差三大块");
+println("  1. 文件 IO，读不到源码就无从谈起");
+println("  2. 字符串处理，逐字符扫描是词法分析的基础");
+println("  3. 模块系统，当前只有单文件");
+println("另有结构体动态构造、异常机制两个绕不开的表达力问题");
+println("");
+println("按当前 3200 行 Rust 实现的规模折算");
+println("大约还需 15 到 20 个新特性与内建函数");

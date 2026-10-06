@@ -1,0 +1,70 @@
+/// DFS + 回溯：N 皇后 —— 用列表下标赋值实现棋盘
+var n := 6;
+
+/// queens[r] 表示第 r 行放置的列号，-1 表示该行还没放
+var queens : list = [-1, -1, -1, -1, -1, -1];
+var count := 0;
+
+fn solve(row : int) {
+    global count;
+    global queens;
+    if (row == n) {
+        count++;
+        return();
+    }
+    var col := 0;
+    while (col < n) {
+        var safe := 1;
+        var r := 0;
+        /// 检查与已放置的皇后是否冲突：同列或同斜线
+        while (r < row) {
+            if (queens[r] == col) { safe = 0; }
+            if (queens[r] - col == row - r) { safe = 0; }
+            if (col - queens[r] == row - r) { safe = 0; }
+            r++;
+        }
+        if (safe == 1) {
+            queens[row] = col;
+            solve(row + 1);
+            queens[row] = -1;   /// 回溯：恢复现场
+        }
+        col++;
+    }
+}
+
+solve(0);
+println(f"{n} 皇后解的总数 = {count}");
+
+/// 再跑一次 5 皇后，把所有解打印出来
+n = 5;
+queens = [-1, -1, -1, -1, -1];
+count = 0;
+
+fn show(row : int) {
+    global count;
+    global queens;
+    if (row == n) {
+        count++;
+        println(f"解 {count}: {queens}");
+        return();
+    }
+    var col := 0;
+    while (col < n) {
+        var safe := 1;
+        var r := 0;
+        while (r < row) {
+            if (queens[r] == col) { safe = 0; }
+            if (queens[r] - col == row - r) { safe = 0; }
+            if (col - queens[r] == row - r) { safe = 0; }
+            r++;
+        }
+        if (safe == 1) {
+            queens[row] = col;
+            show(row + 1);
+            queens[row] = -1;
+        }
+        col++;
+    }
+}
+
+show(0);

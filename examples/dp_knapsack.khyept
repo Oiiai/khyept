@@ -1,0 +1,35 @@
+/// 二维 DP：0-1 背包 —— 现在可以直接用列表下标做 DP 表
+var n := 4;
+var cap := 10;
+
+/// 物品：重量与价值
+var w : list = [2, 3, 4, 5];
+var v : list = [3, 4, 5, 8];
+
+/// dp[j] = 容量为 j 时的最大价值。用下标赋值逐步更新。
+var dp : list = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+println("初始 dp（全是 0）:");
+println(f"{dp}");
+println("");
+
+/// 逐件物品做 0-1 背包：容量必须倒序遍历，保证每件物品只用一次
+var i := 0;
+while (i < n) {
+    println(f"加入物品 {i}（重量 {w[i]}, 价值 {v[i]}）:");
+    var j := cap;
+    while (j >= w[i]) {
+        /// 取当前物品：dp[j - w[i]] + v[i]
+        var with_item := dp[j - w[i]] + v[i];
+        /// 不取：dp[j]
+        if (with_item > dp[j]) {
+            dp[j] = with_item;
+        }
+        j--;
+    }
+    println(f"  dp = {dp}");
+    i++;
+}
+
+println("");
+println(f"容量 {cap} 时的最大价值 = {dp[cap]}");

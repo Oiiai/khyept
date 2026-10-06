@@ -1,0 +1,70 @@
+/// BFS 网格最短路径 —— 现在可以直接用列表下标赋值做队列
+/// 网格：0 可走，1 障碍。求从 (0,0) 到 (2,2) 的最短步数
+var grid : list = [
+    [0, 0, 0],
+    [1, 0, 1],
+    [0, 0, 0]
+];
+
+/// 队列：用下标写入实现，预先分配 25 个格子（3x3 网格最多访问 9 个，这里留足余量）
+var queue : list = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+var head := 0;
+var tail := 0;
+
+/// 记录每个格子是否访问过，以及到起点的距离（下标 = r*3+c）
+var visited : list = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+var dist : list = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+queue[0] = 0;      /// 入队起点
+tail++;
+visited[0] = 1;
+
+/// 方向偏移：下、右、上、左
+var dr := [1, 0, -1, 0];
+var dc := [0, 1, 0, -1];
+
+var found := -1;
+
+while (head < tail) {
+    var cur := queue[head];
+    head++;
+
+    if (cur == 8) {
+        found = cur;
+        break;
+    }
+
+    var r := cur / 3;
+    var c := cur % 3;
+
+    var d := 0;
+    while (d < 4) {
+        var nr := r + dr[d];
+        var nc := c + dc[d];
+        if (nr >= 0 && nr < 3 && nc >= 0 && nc < 3) {
+            var nid := nr * 3 + nc;
+            var passable := grid[nr][nc];
+            var seen := visited[nid];
+            if (passable == 0 && seen == 0) {
+                visited[nid] = 1;
+                dist[nid] = dist[cur] + 1;
+                queue[tail] = nid;
+                tail++;
+            }
+        }
+        d++;
+    }
+}
+
+println(f"队列最终长度 = {tail}");
+println(f"最短步数 = {dist[8]}");
+
+/// 打印访问顺序（BFS 保证按距离递增）
+println("访问顺序:");
+var i := 0;
+while (i < tail) {
+    var code := queue[i];
+    print(f"({code / 3},{code % 3}) ");
+    i++;
+}
+println("");
