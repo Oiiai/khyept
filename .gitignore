@@ -9,3 +9,9 @@ vscode-khyept/extension.vsixmanifest
 /migrate_examples.py
 /migrate_comments.py
 *.sh text eol=lf
+
+# 示例运行产生的文件
+/222.txt
+/333.bin
+/444.txt
+/1.txt

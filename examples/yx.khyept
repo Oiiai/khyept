@@ -1,0 +1,4 @@
+var fr : string = open("examples/input.txt", "r");
+var fr_content : string = fr.read();
+
+println(fr_content);

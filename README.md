@@ -231,7 +231,18 @@ println(d.size());           /// 2
 `open()` 返回一个文件句柄（类型标注写 `string` 即可），通过 `read` / `write` / `writeln` / `close` 操作：
 
 ```khyept
-/// 写入（覆盖）
+var f := open("1.txt", "w");
+f.write("114514");
+f.close();
+
+var f1 := open("1.txt", "r");
+println(f1.read());       /// 输出 114514
+f1.close();
+```
+
+句柄也可以显式标注成 `string`，两种写法等价：
+
+```khyept
 var f : string = open("222.txt", "w", encoding="utf-8");
 f.write("Hello, World!");
 f.close();

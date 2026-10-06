@@ -1426,9 +1426,11 @@ impl Interpreter {
                 } else {
                     Value::Null
                 };
-                // 声明处的类型检查：显式标注或 `:=` 推断都参与
+                // 声明处的类型检查：显式标注或 `:=` 推断都参与。
+                // 推断必须用 type_tag 而不是 value_type：后者对文件句柄
+                // 返回描述文本，会被当成不存在的类型名。
                 let declared: Option<String> = if *inferred {
-                    Some(value_type(&value))
+                    Some(type_tag(&value))
                 } else {
                     annotation.clone()
                 };
@@ -1445,7 +1447,7 @@ impl Interpreter {
                 self.check_type(declared.as_deref(), &value)?;
                 let binding = Binding {
                     inferred_type: if *inferred {
-                        Some(value_type(&value))
+                        Some(type_tag(&value))
                     } else {
                         None
                     },
@@ -2490,6 +2492,16 @@ fn value_type(value: &Value) -> String {
         Value::Dict(_) => "dict".into(),
         Value::Struct { name, .. } => name.clone(),
         Value::File { path, mode, .. } => format!("<file {path} mode={mode}>"),
+    }
+}
+
+/// 类型系统内部使用的标记，必须是 `check_type` 认识的合法类型名。
+/// 与 `value_type` 的区别：后者面向用户，会返回文件句柄这类描述文本。
+fn type_tag(value: &Value) -> String {
+    match value {
+        // 文件句柄在类型系统里就是 string，与显式标注 `var f : string` 一致
+        Value::File { .. } => "string".into(),
+        other => value_type(other),
     }
 }
 
@@ -4090,6 +4102,62 @@ mod tests {
         assert!(matches!(
             interpreter.lookup("text"),
             Some(Value::String(v)) if v == "ok"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn walrus_infers_file_handle_type() {
+        // `:=` 推断文件句柄时，类型标记必须是 string 而不是描述文本，
+        // 否则会报「未知类型 `<file ...>`」
+        let dir = std::env::temp_dir().join("khyept_walrus_file_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("w.txt");
+        let path_str = path.to_string_lossy().replace('\\', "\\\\");
+        let src = format!(
+            r#"
+            var f := open("{path_str}", "w");
+            f.write("114514");
+            f.close();
+            var f1 := open("{path_str}", "r");
+            var content : string = f1.read();
+            f1.close();
+            "#
+        );
+        let ast = Parser::new(lex(&src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(
+            interpreter.lookup("content"),
+            Some(Value::String(v)) if v == "114514"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn close_is_available_and_repeatable() {
+        // close 返回 null，可以显式调用也不影响后续操作
+        let dir = std::env::temp_dir().join("khyept_close_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("c.txt");
+        let path_str = path.to_string_lossy().replace('\\', "\\\\");
+        let src = format!(
+            r#"
+            var f := open("{path_str}", "w");
+            f.write("x");
+            var closed = f.close();
+            var g := open("{path_str}", "r");
+            var text : string = g.read();
+            g.close();
+            "#
+        );
+        let ast = Parser::new(lex(&src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(interpreter.lookup("closed"), Some(Value::Null)));
+        assert!(matches!(
+            interpreter.lookup("text"),
+            Some(Value::String(v)) if v == "x"
         ));
         let _ = std::fs::remove_dir_all(&dir);
     }
