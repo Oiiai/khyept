@@ -1,7 +1,116 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::rc::Rc;
+
+/// 引用计数容器，配合写时复制使用。
+///
+/// khyept 的赋值是值语义：`b = a` 之后改 b 不应影响 a。
+/// 但如果每次写入都深拷贝整个列表，`list[i] = x` 会退化成 O(n)，
+/// 连续追加就是 O(n²)。
+///
+/// 折中办法是写时复制：克隆只是把 `Rc` 计数加一（O(1)，数据仍共享），
+/// 只有真正要写入且此时引用计数大于 1 时，才把内容克隆成独立的一份。
+/// 唯一引用下的写入就地修改，语义不变，开销也降为 O(1)。
+type RcList = Rc<RefCell<Vec<Value>>>;
+
+/// 可哈希的字典键。
+///
+/// `Value` 本身不能直接做键，因为列表 / 字典 / 结构体是容器，
+/// 既难哈希也不适合用 `Hash` 表达「内容相等」。这里只把标量类型
+/// 编成带类型标签的键，于是 `1` 与 `1.0` 哈希到不同槽位——
+/// 这与 `==` 的语义一致（跨类型比较返回 false）。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum DictKey {
+    Null,
+    Bool(bool),
+    Int(i64),
+    /// 浮点按位表示做键，与 `PartialEq` 的行为对齐
+    Float(u64),
+    Str(String),
+}
+
+/// 字典的内部表示：条目数组保持插入顺序，哈希索引加速查找。
+///
+/// 条目少时索引是空的（线性扫描更快，也没有维护成本）；
+/// 超过阈值才建索引，并且插入时增量维护。
+#[derive(Debug)]
+struct DictData {
+    entries: Vec<(Value, Value)>,
+    /// 键 -> 在entries 里的下标。只为可哈希的标量键建立。
+    index: HashMap<DictKey, usize>,
+    /// 复合类型键（列表 / 字典 / 结构体）的下标，走线性查找
+    fallback: Vec<usize>,
+}
+
+/// 条目数超过这个值才开始建哈希索引
+const DICT_INDEX_THRESHOLD: usize = 16;
+
+impl DictData {
+    fn new(entries: Vec<(Value, Value)>) -> Self {
+        let mut data = Self {
+            entries,
+            index: HashMap::new(),
+            fallback: Vec::new(),
+        };
+        data.rebuild_index();
+        data
+    }
+    /// 重建整个索引。只在结构变化（新增复合键、复制后）时做。
+    fn rebuild_index(&mut self) {
+        self.index.clear();
+        self.fallback.clear();
+        for (position, (key, _)) in self.entries.iter().enumerate() {
+            match dict_key_of(key) {
+                Some(hashed) => {
+                    self.index.insert(hashed, position);
+                }
+                None => self.fallback.push(position),
+            }
+        }
+    }
+    /// 条目数超过阈值时才建索引
+    fn refresh_index(&mut self) {
+        if self.index.is_empty() && self.fallback.is_empty() && self.entries.len() > DICT_INDEX_THRESHOLD
+        {
+            self.rebuild_index();
+        }
+    }
+}
+
+impl Clone for DictData {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            index: self.index.clone(),
+            fallback: self.fallback.clone(),
+        }
+    }
+}
+
+impl PartialEq for DictData {
+    fn eq(&self, other: &Self) -> bool {
+        // 索引是纯加速结构，不参与相等判断
+        self.entries == other.entries
+    }
+}
+
+/// 把标量键编成可哈希的键；容器类型返回 None，走线性查找
+fn dict_key_of(value: &Value) -> Option<DictKey> {
+    match value {
+        Value::Null => Some(DictKey::Null),
+        Value::Bool(b) => Some(DictKey::Bool(*b)),
+        Value::Int(n) => Some(DictKey::Int(*n)),
+        Value::Float(f) => Some(DictKey::Float(f.to_bits())),
+        Value::String(s) => Some(DictKey::Str(s.clone())),
+        _ => None,
+    }
+}
+
+type RcDict = Rc<RefCell<DictData>>;
 
 #[derive(Clone, Debug, PartialEq)]
 enum TokenKind {
@@ -405,15 +514,15 @@ struct StructInstance {
     initializers: Vec<Vec<Expr>>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 enum Value {
     Null,
     Bool(bool),
     Int(i64),
     Float(f64),
     String(String),
-    List(Vec<Value>),
-    Dict(Vec<(Value, Value)>),
+    List(RcList),
+    Dict(RcDict),
     Struct {
         name: String,
         fields: Vec<StructMember>,
@@ -428,12 +537,176 @@ enum Value {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+impl Value {
+    /// 列表长度，列表写入走写时复制所以这里只读
+    fn list_len(&self) -> usize {
+        match self {
+            Value::List(values) => values.borrow().len(),
+            _ => 0,
+        }
+    }
+    /// 字典长度
+    fn dict_len(&self) -> usize {
+        match self {
+            Value::Dict(entries) => entries.borrow().entries.len(),
+            _ => 0,
+        }
+    }
+    /// 从 `Value::List(vec![])` 这类旧构造方式建立列表
+    fn make_list(values: Vec<Value>) -> Value {
+        Value::List(Rc::new(RefCell::new(values)))
+    }
+    fn make_dict(entries: Vec<(Value, Value)>) -> Value {
+        Value::Dict(Rc::new(RefCell::new(DictData::new(entries))))
+    }
+    fn make_dict_data(data: DictData) -> Value {
+        Value::Dict(Rc::new(RefCell::new(data)))
+    }
+    /// 不含写时复制容器的克隆。列表 / 字典请直接 clone `Value`。
+    fn clone_shallow(&self) -> Value {
+        match self {
+            Value::Null => Value::Null,
+            Value::Bool(b) => Value::Bool(*b),
+            Value::Int(n) => Value::Int(*n),
+            Value::Float(n) => Value::Float(*n),
+            Value::String(s) => Value::String(s.clone()),
+            Value::Struct { name, fields } => Value::Struct {
+                name: name.clone(),
+                fields: fields.clone(),
+            },
+            Value::File {
+                path,
+                mode,
+                encoding,
+                position,
+            } => Value::File {
+                path: path.clone(),
+                mode: mode.clone(),
+                encoding: encoding.clone(),
+                position: *position,
+            },
+            Value::List(_) | Value::Dict(_) => unreachable!("容器请走 Value::clone 的写时复制路径"),
+        }
+    }
+}
+
+/// 值是标量时直接按值比较；列表 / 字典用内容比较，
+/// 这样写时复制出来的副本与原值仍然 `==`。
+impl Clone for Value {
+    fn clone(&self) -> Self {
+        match self {
+            Value::List(values) => Value::List(Rc::clone(values)),
+            Value::Dict(entries) => Value::Dict(Rc::clone(entries)),
+            other => other.clone_shallow(),
+        }
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::List(a), Value::List(b)) => {
+                // 借用两次再逐元素比较。必须先把两侧都借出来，
+                // 否则 `Rc` 的默认 PartialEq 会自己再比较一次 `T`，
+                // 形成 `Rc::eq -> Value::eq -> Rc::eq` 的双向往返递归。
+                let a = a.borrow();
+                let b = b.borrow();
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
+            }
+            (Value::Dict(a), Value::Dict(b)) => {
+                // DictData 的 PartialEq 只比条目数组，索引不参与
+                let a = a.borrow();
+                let b = b.borrow();
+                a.entries == b.entries
+            }
+            (Value::Null, Value::Null) => true,
+            (Value::Bool(x), Value::Bool(y)) => x == y,
+            (Value::Int(x), Value::Int(y)) => x == y,
+            (Value::Float(x), Value::Float(y)) => x == y,
+            (Value::String(x), Value::String(y)) => x == y,
+            (Value::File { path: xp, mode: xm, .. }, Value::File { path: yp, mode: ym, .. }) => {
+                xp == yp && xm == ym
+            }
+            (
+                Value::Struct {
+                    name: xn,
+                    fields: xf,
+                },
+                Value::Struct {
+                    name: yn,
+                    fields: yf,
+                },
+            ) => xn == yn && xf == yf,
+            // 类型不同：交给标量比较，能安全得出 false 而不递归
+            _ => self.clone_shallow() == other.clone_shallow(),
+        }
+    }
+}
+
+/// 写列表前调用：确保 `slot` 指向一份不再与他人共享的列表。
+///
+/// khyept 是值语义，`b = a` 之后改 b 不能影响 a。若多个变量共享同一个
+/// `Rc`，写入前必须先把内容复制成独立一份，再让该变量指向新副本。
+/// 只有一个引用时无需复制，直接原地改。
+fn detach_list_for_write(slot: &mut Value) -> Result<(), String> {
+    let Value::List(values) = slot else {
+        return Err("容器不是列表".into());
+    };
+    if Rc::strong_count(values) > 1 {
+        let copied = values.borrow().clone();
+        *slot = Value::make_list(copied);
+    }
+    Ok(())
+}
+
+/// 字典版本，与 `detach_list_for_write` 同理
+fn detach_dict_for_write(slot: &mut Value) -> Result<(), String> {
+    let Value::Dict(entries) = slot else {
+        return Err("容器不是字典".into());
+    };
+    if Rc::strong_count(entries) > 1 {
+        let copied = entries.borrow().clone();
+        *slot = Value::make_dict_data(copied);
+    }
+    Ok(())
+}
+
+/// 拿到可安全写入的列表：调用前必须先用 `detach_list_for_write` 脱离共享。
+fn list_for_write(list: &RcList) -> std::cell::RefMut<'_, Vec<Value>> {
+    list.borrow_mut()
+}
+
+/// 字典版本，与 `list_for_write` 同理
+fn dict_for_write(dict: &RcDict) -> std::cell::RefMut<'_, DictData> {
+    dict.borrow_mut()
+}
+
+#[derive(Debug)]
 struct StructMember {
     name: String,
     value: Value,
     mutable: bool,
     annotation: Option<String>,
+}
+
+impl Clone for StructMember {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            value: self.value.clone(),
+            mutable: self.mutable,
+            annotation: self.annotation.clone(),
+        }
+    }
+}
+
+impl PartialEq for StructMember {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.mutable == other.mutable
+            && self.annotation == other.annotation
+            && self.value == other.value
+    }
 }
 
 struct Parser {
@@ -1263,15 +1536,18 @@ fn scan_to_bracket_end(&mut self) -> bool {
         let mut has_colon = false;
         while self.at < self.tokens.len() {
             match &self.tokens[self.at].kind {
-                TokenKind::Symbol('[') | TokenKind::Symbol('(') | TokenKind::Symbol('{') => {
-                    depth += 1
+            TokenKind::Symbol('[') | TokenKind::Symbol('(') | TokenKind::Symbol('{') => {
+                depth += 1
+            }
+            // 三种闭合符都要计入深度。只处理 `]` 的话，`v[len(v)]` 里的 `(` 会把
+            // 深度顶到 1，随后的 `]` 就被当成内层闭合继续扫描，一路越过本语句，
+            // 直到撞上后续行的 `:`，把普通下标误判成切片并报「期望 `:`」。
+            TokenKind::Symbol(']') | TokenKind::Symbol(')') | TokenKind::Symbol('}') => {
+                if depth == 0 {
+                    break;
                 }
-                TokenKind::Symbol(']') => {
-                    if depth == 0 {
-                        break;
-                    }
-                    depth -= 1;
-                }
+                depth -= 1;
+            }
                 TokenKind::Symbol(':') if depth == 0 => has_colon = true,
                 TokenKind::Eof => break,
                 _ => {}
@@ -1876,14 +2152,14 @@ impl Interpreter {
                 for value in values {
                     result.push(self.eval(value)?);
                 }
-                Ok(Value::List(result))
+                Ok(Value::make_list(result))
             }
             Expr::Dict(entries) => {
                 let mut result = Vec::with_capacity(entries.len());
                 for (key, value) in entries {
                     result.push((self.eval(key)?, self.eval(value)?));
                 }
-                Ok(Value::Dict(result))
+                Ok(Value::make_dict(result))
             }
             Expr::StructInit(name, values) => {
                 let def = self
@@ -2076,6 +2352,35 @@ impl Interpreter {
             }
             Expr::Member(base, field) => self.assign_member(base, field, value),
             Expr::Index(container_expr, index) => {
+                // 快速路径：容器是个变量时，直接改它持有的那个列表。
+                // 走 eval 再回写的话，中间会多出一份克隆，
+                // `l[i] = x` 每次都要深拷贝整个列表，退化成 O(n)。
+                if let Expr::Variable(name) = &**container_expr {
+                    let index = self.eval(index)?;
+                    let Some(binding) = self.lookup_mut(name) else {
+                        return Err(format!("变量 `{name}` 未定义"));
+                    };
+                    // 先脱离共享：值语义要求 `b = a` 后改 b 不影响 a，
+                    // 所以有人共享同一份数据时必须先复制成独立一份。
+                    match &binding.value {
+                        Value::List(_) => {
+                            detach_list_for_write(&mut binding.value)?;
+                            let Value::List(values) = &binding.value else {
+                                unreachable!()
+                            };
+                            return write_into_list(values, &index, value);
+                        }
+                        Value::Dict(_) => {
+                            detach_dict_for_write(&mut binding.value)?;
+                            let Value::Dict(entries) = &binding.value else {
+                                unreachable!()
+                            };
+                            return write_into_dict(entries, &index, value);
+                        }
+                        // 不是列表 / 字典时退回通用路径，让它报出准确的错误
+                        _ => {}
+                    }
+                }
                 // 先算出新的容器值，再把容器本身写回其赋值目标。
                 // 这样 l[0][1] = 9、s.field[0] = 9 之类的嵌套路径也能工作。
                 let container = self.eval(container_expr)?;
@@ -2185,8 +2490,8 @@ impl Interpreter {
         match name {
             "type" => Ok(Value::String(value_type(&value))),
             "size" | "len" => match value {
-                Value::List(values) => Ok(Value::Int(values.len() as i64)),
-                Value::Dict(entries) => Ok(Value::Int(entries.len() as i64)),
+                Value::List(_) => Ok(Value::Int(value.list_len() as i64)),
+                Value::Dict(_) => Ok(Value::Int(value.dict_len() as i64)),
                 Value::String(text) => Ok(Value::Int(text.chars().count() as i64)),
                 _ => Err(format!(
                     "`{name}` 只能用于列表、字典或字符串，收到 `{}`",
@@ -2526,6 +2831,7 @@ fn index_value(container: &Value, index: &Value) -> Result<Value, String> {
                 return Ok(Value::Int(0));
             }
             Ok(values
+                .borrow()
                 .get(*index as usize)
                 .cloned()
                 .unwrap_or(Value::Int(0)))
@@ -2541,12 +2847,12 @@ fn index_value(container: &Value, index: &Value) -> Result<Value, String> {
             Ok(Value::String(chars[*index as usize].to_string()))
         }
         Value::Dict(entries) => {
-            for (key, value) in entries {
-                if matches!(binary(key.clone(), "==", index.clone())?, Value::Bool(true)) {
-                    return Ok(value.clone());
-                }
+            let data = entries.borrow();
+            // 与写入路径共用查找逻辑，标量键走哈希索引
+            match dict_key_position(&data, index)? {
+                Some(at) => Ok(data.entries[at].1.clone()),
+                None => Ok(Value::Int(0)),
             }
-            Ok(Value::Int(0))
         }
         _ => Err("下标访问只能用于列表、字典或字符串".into()),
     }
@@ -2612,8 +2918,8 @@ fn method_call(
                 return Err(format!("`{name}` 不接受参数"));
             }
             let size = match target {
-                Value::List(values) => values.len(),
-                Value::Dict(entries) => entries.len(),
+                Value::List(_) => target.list_len(),
+                Value::Dict(_) => target.dict_len(),
                 Value::String(text) => text.chars().count(),
                 other => {
                     return Err(format!(
@@ -2668,7 +2974,7 @@ fn file_method(
                 Value::String(s) => s.clone(),
                 Value::List(items) => {
                     let mut joined = String::new();
-                    for item in items {
+                    for item in items.borrow().iter() {
                         let Value::String(s) = item else {
                             return Err("`writeln` 的列表元素必须是字符串".into());
                         };
@@ -2737,8 +3043,9 @@ fn value_to_bytes(value: &Value, encoding: &str) -> Result<Vec<u8>, String> {
     match value {
         Value::String(text) => Ok(encode_text(text, encoding)),
         Value::List(items) => {
+            let items = items.borrow();
             let mut bytes = Vec::with_capacity(items.len());
-            for item in items {
+            for item in items.iter() {
                 let Value::Int(n) = item else {
                     return Err("写入二进制时列表元素必须是 int".into());
                 };
@@ -2796,30 +3103,115 @@ fn decode_text(bytes: &[u8], encoding: &str) -> String {
     }
 }
 
+/// 写入列表的某个位置。调用方已经持有唯一引用，所以直接改写。
+fn write_into_list(
+    values: &RcList,
+    index: &Value,
+    value: Value,
+) -> Result<(), String> {
+    let Value::Int(position) = index else {
+        return Err("列表下标必须是 int".into());
+    };
+    let position = *position;
+    if position < 0 {
+        return Err(format!("列表下标不能为负 ({position})"));
+    }
+    let mut items = list_for_write(values);
+    let position = position as usize;
+    if position < items.len() {
+        items[position] = value;
+    } else if position == items.len() {
+        items.push(value);
+    } else {
+        return Err(format!(
+            "列表下标 {position} 越界（当前长度 {}，只能在末尾追加）",
+            items.len()
+        ));
+    }
+    Ok(())
+}
+
+/// 写入字典的某个键，不存在则新增
+fn write_into_dict(
+    entries: &RcDict,
+    index: &Value,
+    value: Value,
+) -> Result<(), String> {
+    let position = dict_key_position(&entries.borrow(), index)?;
+    let mut data = dict_for_write(entries);
+    match position {
+        Some(at) => data.entries[at].1 = value,
+        None => {
+            let at = data.entries.len();
+            data.entries.push((index.clone(), value));
+            // 增量维护索引：标量键进哈希表，复合键进 fallback 列表
+            match dict_key_of(index) {
+                Some(key) => {
+                    data.index.insert(key, at);
+                }
+                None => data.fallback.push(at),
+            }
+            data.refresh_index();
+        }
+    }
+    Ok(())
+}
+
+/// 找出键在字典条目中的位置。
+///
+/// 标量键走哈希索引，O(1)；复合类型键（列表 / 字典 / 结构体）
+/// 没有稳定的哈希，退回线性扫描——数量很少，不影响整体性能。
+/// 索引里记录的是条目下标，所以插入与改值都不需要重建。
+fn dict_key_position(data: &DictData, index: &Value) -> Result<Option<usize>, String> {
+    if let Some(key) = dict_key_of(index) {
+        // 索引未建立时（条目还很少）直接扫，命中后才把它加进索引
+        if !data.index.is_empty() || !data.fallback.is_empty() {
+            return Ok(data.index.get(&key).copied());
+        }
+        let mut found = None;
+        for (at, (existing, _)) in data.entries.iter().enumerate() {
+            if dict_key_of(existing).as_ref() == Some(&key) {
+                found = Some(at);
+                break;
+            }
+        }
+        return Ok(found);
+    }
+    // 复合键：只在 fallback 记录的下标里线性找
+    let mut hit = None;
+    for at in data.fallback.iter().copied() {
+        let (existing, _) = &data.entries[at];
+        if matches!(binary(existing.clone(), "==", index.clone())?, Value::Bool(true)) {
+            hit = Some(at);
+            break;
+        }
+    }
+    Ok(hit)
+}
+
 /// 写入列表或字典的某个位置，返回更新后的容器。
 /// 列表允许下标等于长度时追加，超过则报错；字典允许新增键。
 fn assign_index(container: Value, index: Value, value: Value) -> Result<Value, String> {
-    match container {
-        Value::List(mut values) => {
-            let Value::Int(position) = index else {
-                return Err("列表下标必须是 int".into());
-            };
-            if position < 0 {
-                return Err(format!("列表下标不能为负 ({position})"));
-            }
-            let position = position as usize;
-            if position < values.len() {
-                values[position] = value;
-            } else if position == values.len() {
-                values.push(value);
-            } else {
-                return Err(format!(
-                    "列表下标 {position} 越界（当前长度 {}，只能在末尾追加）",
-                    values.len()
-                ));
-            }
-            Ok(Value::List(values))
-        }
+    let mut slot = container;
+    if matches!(slot, Value::List(_)) {
+        // 通用路径（容器不是变量）：container 是 eval 出来的副本，
+        // 先脱离共享再写，避免改动泄漏回原变量。
+        detach_list_for_write(&mut slot)?;
+        let Value::List(values) = &slot else {
+            unreachable!()
+        };
+        write_into_list(values, &index, value)?;
+        return Ok(slot);
+    }
+    if matches!(slot, Value::Dict(_)) {
+        detach_dict_for_write(&mut slot)?;
+        let Value::Dict(entries) = &slot else {
+            unreachable!()
+        };
+        write_into_dict(entries, &index, value)?;
+        return Ok(slot);
+    }
+    match slot {
         Value::String(text) => {
             let Value::String(replacement) = value else {
                 return Err("字符串下标赋值必须赋一个字符串".into());
@@ -2843,16 +3235,6 @@ fn assign_index(container: Value, index: Value, value: Value) -> Result<Value, S
             }
             chars[position as usize] = replacement[0];
             Ok(Value::String(chars.into_iter().collect()))
-        }
-        Value::Dict(mut entries) => {
-            for entry in entries.iter_mut() {
-                if matches!(binary(entry.0.clone(), "==", index.clone())?, Value::Bool(true)) {
-                    entry.1 = value;
-                    return Ok(Value::Dict(entries));
-                }
-            }
-            entries.push((index, value));
-            Ok(Value::Dict(entries))
         }
         other => Err(format!(
             "下标赋值只能用于列表或字典，收到 `{}`",
@@ -2942,6 +3324,7 @@ fn value_string(v: &Value) -> String {
         Value::List(values) => format!(
             "[{}]",
             values
+                .borrow()
                 .iter()
                 .map(value_string)
                 .collect::<Vec<_>>()
@@ -2950,6 +3333,8 @@ fn value_string(v: &Value) -> String {
         Value::Dict(entries) => format!(
             "{{{}}}",
             entries
+                .borrow()
+                .entries
                 .iter()
                 .map(|(key, value)| format!("{}: {}", value_string(key), value_string(value)))
                 .collect::<Vec<_>>()
@@ -3537,7 +3922,7 @@ mod tests {
         assert!(matches!(interpreter.lookup("r"), Some(Value::Int(2))));
         assert!(matches!(
             interpreter.lookup("l"),
-            Some(Value::List(v)) if v == &vec![
+            Some(Value::List(v)) if *v.borrow() == vec![
                 Value::Int(0),
                 Value::Int(2),
                 Value::Int(2),
@@ -3558,7 +3943,7 @@ mod tests {
         assert!(matches!(
             interpreter.lookup("l"),
             Some(Value::List(v))
-                if v == &vec![Value::Int(1), Value::Int(2), Value::Int(3)]
+                if *v.borrow() == vec![Value::Int(1), Value::Int(2), Value::Int(3)]
         ));
     }
 
@@ -3592,11 +3977,217 @@ mod tests {
         let Value::List(rows) = interpreter.lookup("g").unwrap() else {
             panic!("expected list");
         };
+        let rows = rows.borrow();
         let Value::List(first) = &rows[0] else {
             panic!("expected list");
         };
-        assert!(matches!(&first[1], Value::Int(5)));
-        assert!(matches!(interpreter.lookup("d"), Some(Value::Dict(e)) if e.len() == 2));
+        assert!(matches!(&first.borrow()[1], Value::Int(5)));
+        let Value::Dict(entries) = interpreter.lookup("d").unwrap() else {
+            panic!("expected dict");
+        };
+        assert!(entries.borrow().entries.len() == 2);
+    }
+
+    #[test]
+    fn looks_up_dict_keys_of_every_scalar_type() {
+        // 字典查找对整数 / 布尔 / 字符串 / 浮点键都走直接比较，
+        // 这里锁住各类键的读写与「缺失返回 0」的行为
+        let src = r#"
+            var by_int : dict = {1: "one", 2: "two"};
+            var by_str : dict = {"a": 1};
+            var by_float : dict = {3.5: "x"};
+            var by_bool : dict = {true: 7};
+
+            var r_int = by_int[2];
+            var r_str = by_str["a"];
+            var r_float = by_float[3.5];
+            var r_bool = by_bool[true];
+            var r_missing = by_str["nope"];
+            by_int[2] = "TWO";
+            var r_updated = by_int[2];
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        for (name, expected) in [("r_int", "two"), ("r_float", "x"), ("r_updated", "TWO")] {
+            let actual = interpreter.lookup(name).cloned().unwrap();
+            assert!(
+                matches!(&actual, Value::String(s) if s == expected),
+                "{name} 期望 {expected}，实际 {}",
+                value_string(&actual)
+            );
+        }
+        // 存的是整数值的键、以及缺失键，都应得到整数
+        assert!(matches!(
+            interpreter.lookup("r_str"),
+            Some(Value::Int(1))
+        ));
+        assert!(matches!(
+            interpreter.lookup("r_bool"),
+            Some(Value::Int(7))
+        ));
+        assert!(matches!(
+            interpreter.lookup("r_missing"),
+            Some(Value::Int(0))
+        ));
+    }
+
+    #[test]
+    fn finds_dict_keys_beyond_the_index_threshold() {
+        // 字典条目超过阈值后才建哈希索引，这里覆盖阈值前后的查找一致性，
+        // 以及覆盖写、缺失键等路径
+        let src = r#"
+            var d : dict = {};
+            var i := 0;
+            while (i < 100) { d[i] = i * 10; i++; }
+            var mid = d[50];
+            var first = d[0];
+            var last = d[99];
+            var missing = d[999];
+            var size_before = len(d);
+
+            i = 0;
+            while (i < 100) { d[i] = 7; i++; }
+            var after_overwrite = d[37];
+            var size_after = len(d);
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        for (name, expected) in [
+            ("mid", 500),
+            ("first", 0),
+            ("last", 990),
+            ("missing", 0),
+            ("size_before", 100),
+            ("after_overwrite", 7),
+            ("size_after", 100),
+        ] {
+            let actual = interpreter.lookup(name).cloned().unwrap();
+            assert!(
+                matches!(actual, Value::Int(n) if n == expected),
+                "{name} 期望 {expected}，实际 {}",
+                value_string(&actual)
+            );
+        }
+    }
+
+#[test]
+    fn keeps_dict_int_and_float_keys_distinct() {
+        // `==` 跨类型比较返回 false，所以 1 与 1.0 必须是两个不同的键。
+        // 哈希键带类型标签才能保证索引不把它们混为一谈。
+        let src = r#"
+            var d : dict = {1: "int", 1.0: "float"};
+            var by_int = d[1];
+            var by_float = d[1.0];
+            var count = len(d);
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        let read = |name: &str| match interpreter.lookup(name) {
+            Some(Value::String(s)) => s.clone(),
+            other => panic!("{name} 应为字符串，实际 {:?}", other),
+        };
+        assert_eq!(read("by_int"), "int");
+        assert_eq!(read("by_float"), "float");
+        assert!(matches!(interpreter.lookup("count"), Some(Value::Int(2))));
+    }
+
+#[test]
+    fn keeps_list_assignment_by_value() {
+        // 回归：为了性能把列表改成 Rc 共享后曾不小心破坏值语义。
+        // 这里锁住「赋值是复制」这条核心语义，任何共享化优化都不能破坏它。
+        let src = r#"
+            var a : list = [1, 2, 3];
+            var b : list = a;
+            b[0] = 99;
+            var read_a = a[0];
+            var read_b = b[0];
+
+            var c : list = a;
+            a[1] = 50;
+            var read_a2 = a[1];
+            var read_c = c[1];
+
+            var d : dict = {"k": 1};
+            var e : dict = d;
+            e["k"] = 7;
+            var read_d = d["k"];
+            var read_e = e["k"];
+
+            var nested : list = [[1, 2], [3, 4]];
+            var copy : list = nested;
+            nested[0][0] = 88;
+            var read_nested = nested[0][0];
+            var read_copy = copy[0][0];
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        for (name, expected) in [
+            ("read_a", 1),
+            ("read_b", 99),
+            ("read_a2", 50),
+            ("read_c", 2),
+            ("read_d", 1),
+            ("read_e", 7),
+            ("read_nested", 88),
+            ("read_copy", 1),
+        ] {
+            let actual = interpreter.lookup(name).cloned().unwrap();
+            assert!(
+                matches!(actual, Value::Int(n) if n == expected),
+                "{name} 期望 {expected}，实际 {}",
+                value_string(&actual)
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_container_mutation_local_to_a_function() {
+        // 参数按值传递：函数内改列表不应影响调用方的列表
+        let src = r#"
+            fn mutate(l : list) { l[0] = 777; }
+            fn grow(l : list) { l[len(l)] = 9; }
+            var f : list = [1, 2];
+            mutate(f);
+            var after_mutate = f[0];
+            var len_before = len(f);
+            grow(f);
+            var len_after = len(f);
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        assert!(matches!(
+            interpreter.lookup("after_mutate"),
+            Some(Value::Int(1))
+        ));
+        assert!(matches!(interpreter.lookup("len_before"), Some(Value::Int(2))));
+        assert!(matches!(interpreter.lookup("len_after"), Some(Value::Int(2))));
+    }
+
+    #[test]
+    fn parses_index_containing_call_followed_by_annotated_var() {
+        // 回归：scan_to_bracket_end 以前不处理 `)`，导致 `v[len(v)]` 里的
+        // `(` 把深度顶高，后面的 `]` 不被当作外层闭合，扫描一路越过本语句
+        // 撞上下一行的 `:`，把普通下标误判成切片并报「期望 `:`」。
+        let src = r#"
+            var v : list = [];
+            v[len(v)] = 7;
+            var q : int = 1;
+            var w : list = [];
+            w[len(w)] = 3;
+            println(q);
+        "#;
+        let ast = Parser::new(lex(src).unwrap()).program().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.run(&ast).unwrap();
+        let Value::List(values) = interpreter.lookup("v").unwrap() else {
+            panic!("expected list");
+        };
+        assert!(matches!(values.borrow().as_slice(), [Value::Int(7)]));
     }
 
     #[test]
