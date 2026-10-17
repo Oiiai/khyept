@@ -1,0 +1,108 @@
+/// 连通块判断（DFS）
+/// 输入 n m，m 条无向边，最后一行 x y。
+/// 若 x 与 y 同属一个连通块，输出该连通块的点数，否则输出 0。
+///
+/// 邻接表用链式前向星：head[u] 是 u 的第一条边编号，-1 表示没有；
+/// to[k] 是第 k 条边的终点，nxt[k] 是同一起点的下一条边。
+/// 相比 list of list，这样建表只需一次 O(n+m) 的连续写入，不必反复
+/// 对子列表做下标追加。
+/// DFS 用显式栈迭代实现，既避开递归深度上限 256，深链图也不会爆栈。
+///
+/// 复杂度 O(n + m) 时间、O(n + m) 空间。
+/// 满量程 n=10^5、m=2*10^5 约 11 秒（release 构建），可以跑完。
+
+/// 数字字符表，用来判断哪些字符属于一个整数
+var digits : dict = {
+    "0":1, "1":1, "2":1, "3":1, "4":1,
+    "5":1, "6":1, "7":1, "8":1, "9":1
+};
+global digits;
+
+/// 读一行，把其中的所有整数取出来（按空白分隔）
+fn read_ints() -> list {
+    var line : string = readln();
+    var n : int = len(line);
+    var res : list = [];
+    var i := 0;
+    while (i <= n) {
+        /// 走到空白或行尾时，回退找出这一段数字的起点再转换
+        if (i == n || digits[line[i]] != 1) {
+            var j := i;
+            while (j > 0 && digits[line[j - 1]] == 1) { j--; }
+            if (i > j) { res[len(res)] = int(line[j:i]); }
+        }
+        i++;
+    }
+    return(res);
+}
+
+var first : list = read_ints();
+var n : int = first[0];
+var m : int = first[1];
+
+/// head[u]：点 u 的第一条出边编号
+var head : list = [];
+var i := 0;
+while (i <= n) { head[len(head)] = -1; i++; }
+
+/// 无向边拆成两条有向边，编号 0..2m-1
+var cap : int = 2 * m + 2;
+var to : list = [];
+var nxt : list = [];
+i = 0;
+while (i < cap) { to[len(to)] = 0; nxt[len(nxt)] = -1; i++; }
+
+/// k 是已读入的边数，e 是已用掉的有向边编号。
+/// 两者必须分开：每条无向边会消耗两个 e，但只算一条边，
+/// 若拿 e 当循环条件，m=3 时 e 会是 0→2→4，条件在第 2 轮就退出，少读一条边。
+var k := 0;
+var e := 0;
+while (k < m) {
+    var p : list = read_ints();
+    var u : int = p[0];
+    var v : int = p[1];
+    to[e] = v; nxt[e] = head[u]; head[u] = e; e++;
+    to[e] = u; nxt[e] = head[v]; head[v] = e; e++;
+    k++;
+}
+
+var last : list = read_ints();
+var x : int = last[0];
+var y : int = last[1];
+
+/// 从 x 出发做 DFS，顺带统计访问到的点数
+var vis : list = [];
+i = 0;
+while (i <= n) { vis[len(vis)] = 0; i++; }
+
+/// 栈用 `sp` 作为栈顶下标，直接在 sp 位置覆盖写入。
+/// 不能用 len(stack) 定位栈顶：出栈只让 sp 递减，列表不截断，
+/// 按 len 取元素会读到已被弹出的旧值。
+var stack : list = [];
+var sp := 0;
+stack[sp] = x;
+sp++;
+vis[x] = 1;
+
+var cnt := 0;
+while (sp > 0) {
+    sp--;
+    var u : int = stack[sp];
+    cnt++;
+    var e2 : int = head[u];
+    while (e2 != -1) {
+        var w : int = to[e2];
+        if (vis[w] == 0) {
+            vis[w] = 1;      /// 入栈时就标记，避免重复入栈
+            stack[sp] = w;
+            sp++;
+        }
+        e2 = nxt[e2];
+    }
+}
+
+if (vis[y] == 1) {
+    println(cnt);
+} else {
+    println(0);
+}
