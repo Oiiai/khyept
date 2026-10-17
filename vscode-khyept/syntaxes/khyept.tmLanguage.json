@@ -1,15 +1,17 @@
 {
-  "$schema": "https://raw.githubusercontent.com/martinring/ไม่-syntax/master/tmlanguage.json",
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Khyept",
   "scopeName": "source.khyept",
+  "fileTypes": ["khyept", "kypt"],
   "patterns": [
     { "include": "#comments" },
     { "include": "#strings" },
     { "include": "#structs" },
+    { "include": "#functions" },
     { "include": "#keywords" },
     { "include": "#types" },
     { "include": "#constants" },
-    { "include": "#functions" },
+    { "include": "#builtins" },
     { "include": "#numbers" },
     { "include": "#operators" },
     { "include": "#punctuation" }
@@ -29,30 +31,36 @@
     "comments": {
       "patterns": [
         {
-          "name": "comment.line.khyept",
+          "name": "comment.line.double-slash.khyept",
           "match": "///.*$"
         },
         {
           "name": "comment.block.khyept",
           "begin": "/\\*",
-          "end": "\\*/"
+          "end": "\\*/",
+          "beginCaptures": { "0": { "name": "punctuation.definition.comment.begin.khyept" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.comment.end.khyept" } },
+          "patterns": [
+            {
+              "name": "comment.block.documentation.khyept",
+              "begin": "^\\s*\\*",
+              "end": "$"
+            }
+          ]
         }
       ]
     },
     "strings": {
       "patterns": [
         {
-          "name": "string.quoted.double.khyept",
-          "begin": "f\\\"",
-          "end": "\\\"",
+          "name": "string.quoted.double.fstring.khyept",
+          "begin": "(f)\"",
+          "end": "\"",
           "beginCaptures": {
-            "0": { "name": "storage.type.format.khyept" }
+            "1": { "name": "storage.type.format.khyept" }
           },
           "patterns": [
-            {
-              "name": "constant.character.escape.khyept",
-              "match": "\\\\(?:[ntrbfva0\\\\\\\"']|[1-7][0-7]{0,2}|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})"
-            },
+            { "include": "#escapes" },
             {
               "name": "meta.interpolation.khyept",
               "begin": "\\{",
@@ -64,6 +72,8 @@
                 { "include": "#numbers" },
                 { "include": "#operators" },
                 { "include": "#functions" },
+                { "include": "#structs" },
+                { "include": "#keywords" },
                 { "name": "variable.other.khyept", "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b" }
               ]
             }
@@ -71,25 +81,31 @@
         },
         {
           "name": "string.quoted.double.khyept",
-          "begin": "\\\"",
-          "end": "\\\"",
-          "patterns": [
-            {
-              "name": "constant.character.escape.khyept",
-              "match": "\\\\(?:[ntrbfva0\\\\\\\"']|[1-7][0-7]{0,2}|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})"
-            }
-          ]
+          "begin": "\"",
+          "end": "\"",
+          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.khyept" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.khyept" } },
+          "patterns": [{ "include": "#escapes" }]
         },
         {
           "name": "string.quoted.single.khyept",
           "begin": "'",
           "end": "'",
-          "patterns": [
-            {
-              "name": "constant.character.escape.khyept",
-              "match": "\\\\(?:[ntrbfva0\\\\\\\"']|[1-7][0-7]{0,2}|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})"
-            }
-          ]
+          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.khyept" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.khyept" } },
+          "patterns": [{ "include": "#escapes" }]
+        }
+      ]
+    },
+    "escapes": {
+      "patterns": [
+        {
+          "name": "constant.character.escape.khyept",
+          "match": "\\\\(?:[ntrbfva0\\\\\"']|[1-7][0-7]{0,2}|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})"
+        },
+        {
+          "name": "invalid.illegal.bad-escape.khyept",
+          "match": "\\\\."
         }
       ]
     },
@@ -97,11 +113,11 @@
       "patterns": [
         {
           "name": "keyword.control.khyept",
-          "match": "\\b(?:let|var|struct|fn|return|global|if|elif|else|switch|case|default)\\b"
+          "match": "\\b(?:let|var|global|fn|return|break|continue)\\b"
         },
         {
-          "name": "keyword.control.khyept",
-          "match": "\\b(?:while|for|do|break|continue)\\b"
+          "name": "keyword.control.flow.khyept",
+          "match": "\\b(?:if|elif|else|switch|case|default|while|for|do)\\b"
         }
       ]
     },
@@ -121,10 +137,22 @@
         }
       ]
     },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.khyept",
+          "match": "\\b(?:len|size|int|float|string|bool|type|readln|print|println|open)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.file.khyept",
+          "match": "(?<=\\.)(?:read|write|writeln|close|size)\\b"
+        }
+      ]
+    },
     "functions": {
       "patterns": [
         {
-          "match": "\\bfn\\s+(?:(?:int|float|string|bool|void)\\s+)?([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+          "match": "\\bfn\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": { "name": "entity.name.function.khyept" }
           }
@@ -136,26 +164,63 @@
       ]
     },
     "numbers": {
+      "comment": "词法器只支持十进制：整数与小数。0x / 0b / 科学计数法都不合法，故不高亮。",
       "patterns": [
         {
-          "name": "constant.numeric.khyept",
-          "match": "\\b(?:0[xX][0-9A-Fa-f]+|0[bB][01]+|(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?)\\b"
+          "name": "constant.numeric.float.khyept",
+          "match": "\\b[0-9]+\\.[0-9]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.khyept",
+          "match": "\\b[0-9]+\\b(?![eE0-9])"
         }
       ]
     },
     "operators": {
       "patterns": [
         {
-          "name": "keyword.operator.khyept",
-          "match": "===|!==|\\+\\+|--|\\+=|-=|\\*=|/=|%=|==|!=|<=|>=|\\.\\.\\.|<\\.\\.|\\.\\.<|->|:=|&&|\\|\\||<<|>>|\\*\\*|//|~|\\^|[=+\\-*/%<>!&|]"
+          "name": "keyword.operator.comparison.khyept",
+          "match": "==|!=|<=|>|<"
+        },
+        {
+          "name": "keyword.operator.range.khyept",
+          "match": "\\.\\.\\.|<\\.\\.|\\.\\.<"
+        },
+        {
+          "name": "keyword.operator.assignment.khyept",
+          "match": ":=|=|\\+=|-=|\\*=|/=|%="
+        },
+        {
+          "name": "keyword.operator.increment.khyept",
+          "match": "\\+\\+|--"
+        },
+        {
+          "name": "keyword.operator.arithmetic.khyept",
+          "match": "\\*\\*|//|[+\\-*/%]"
+        },
+        {
+          "name": "keyword.operator.bitwise.khyept",
+          "match": "<<|>>|&|\\||\\^|~"
+        },
+        {
+          "name": "keyword.operator.logical.khyept",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "name": "keyword.operator.arrow.khyept",
+          "match": "->"
         }
       ]
     },
     "punctuation": {
       "patterns": [
         {
+          "name": "punctuation.accessor.khyept",
+          "match": "\\."
+        },
+        {
           "name": "punctuation.separator.khyept",
-          "match": ";|,|:|\\."
+          "match": ";|,|:"
         },
         {
           "name": "punctuation.bracket.khyept",

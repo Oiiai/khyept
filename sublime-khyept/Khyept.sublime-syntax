@@ -12,28 +12,32 @@ contexts:
     - include: comments
     - include: strings
     - include: structs
+    - include: functions
     - include: keywords
     - include: types
     - include: constants
-    - include: functions
+    - include: builtins
     - include: numbers
     - include: operators
     - include: punctuation
 
   comments:
     - match: '///.*$'
-      scope: comment.line.khyept
-    - match: '/\\*'
+      scope: comment.line.double-slash.khyept
+    - match: '/\*'
       scope: punctuation.definition.comment.begin.khyept
       push:
         - meta_scope: comment.block.khyept
+        - match: '^\s*\*'
+          scope: comment.block.documentation.khyept
         - match: '\*/'
           scope: punctuation.definition.comment.end.khyept
           pop: true
 
   strings:
-    - match: 'f"'
-      scope: storage.type.format.khyept punctuation.definition.string.begin.khyept
+    - match: '(f)"'
+      captures:
+        1: storage.type.format.khyept
       push: f-string
     - match: '"'
       scope: punctuation.definition.string.begin.khyept
@@ -42,26 +46,29 @@ contexts:
       scope: punctuation.definition.string.begin.khyept
       push: single-string
 
+  escapes:
+    - match: '\\(?:[ntrbfva0\\"'']|[1-7][0-7]{0,2}|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})'
+      scope: constant.character.escape.khyept
+    - match: '\\.'
+      scope: invalid.illegal.bad-escape.khyept
+
   double-string:
     - meta_scope: string.quoted.double.khyept
-    - match: '\\\\(?:[ntrbfva0\\\\"'']|[1-7][0-7]{0,2}|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})'
-      scope: constant.character.escape.khyept
+    - include: escapes
     - match: '"'
       scope: punctuation.definition.string.end.khyept
       pop: true
 
   single-string:
     - meta_scope: string.quoted.single.khyept
-    - match: '\\\\(?:[ntrbfva0\\\\"'']|[1-7][0-7]{0,2}|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})'
-      scope: constant.character.escape.khyept
+    - include: escapes
     - match: "'"
       scope: punctuation.definition.string.end.khyept
       pop: true
 
   f-string:
-    - meta_scope: string.quoted.double.khyept
-    - match: '\\\\(?:[ntrbfva0\\\\"'']|[1-7][0-7]{0,2}|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})'
-      scope: constant.character.escape.khyept
+    - meta_scope: string.quoted.double.fstring.khyept
+    - include: escapes
     - match: '\{'
       scope: punctuation.section.interpolation.begin.khyept
       push: interpolation
@@ -75,6 +82,8 @@ contexts:
     - include: numbers
     - include: operators
     - include: functions
+    - include: structs
+    - include: keywords
     - match: '[A-Za-z_][A-Za-z0-9_]*'
       scope: variable.other.khyept
     - match: '\}'
@@ -88,8 +97,10 @@ contexts:
         2: entity.name.type.struct.khyept
 
   keywords:
-    - match: '\b(?:let|var|struct|fn|return|global|if|elif|else|switch|case|default|while|for|do|break|continue)\b'
+    - match: '\b(?:let|var|global|fn|return|break|continue)\b'
       scope: keyword.control.khyept
+    - match: '\b(?:if|elif|else|switch|case|default|while|for|do)\b'
+      scope: keyword.control.flow.khyept
 
   types:
     - match: '\b(?:int|float|string|bool|void|list|dict)\b'
@@ -99,23 +110,49 @@ contexts:
     - match: '\b(?:true|false|null)\b'
       scope: constant.language.khyept
 
+  builtins:
+    - match: '\b(?:len|size|int|float|string|bool|type|readln|print|println|open)\b(?=\s*\()'
+      scope: support.function.builtin.khyept
+    - match: '(?<=\.)(?:read|write|writeln|close|size)\b'
+      scope: support.function.file.khyept
+
   functions:
-    - match: '\bfn\s+(?:(?:int|float|string|bool|void)\s+)?([A-Za-z_][A-Za-z0-9_]*)(?=\s*\()'
+    - match: '\bfn\s+([A-Za-z_][A-Za-z0-9_]*)'
       captures:
         1: entity.name.function.khyept
     - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
       scope: entity.name.function.call.khyept
 
   numbers:
-    - match: '\b(?:0[xX][0-9A-Fa-f]+|0[bB][01]+|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)\b'
-      scope: constant.numeric.khyept
+    # 词法器只支持十进制：整数与小数。0x / 0b / 科学计数法都不合法，故不高亮。
+    # 负向断言防止把1e10、0x1F 里的片段误当合法数字。
+    - match: '\b[0-9]+\.[0-9]+\b'
+      scope: constant.numeric.float.khyept
+    - match: '\b[0-9]+\b(?![eE0-9])'
+      scope: constant.numeric.integer.khyept
 
   operators:
-    - match: '===|!==|\+\+|--|\+=|-=|\*=|/=|%=|==|!=|<=|>=|\.\.\.|<\.\.|\.\.<|->|:=|&&|\|\||<<|>>|\*\*|//|~|\^|[=+\-*/%<>!&|]'
-      scope: keyword.operator.khyept
+    - match: '==|!=|<=|>|<'
+      scope: keyword.operator.comparison.khyept
+    - match: '\.\.\.|<\.\.|\.\.<'
+      scope: keyword.operator.range.khyept
+    - match: ':=|=|\+=|-=|\*=|/=|%='
+      scope: keyword.operator.assignment.khyept
+    - match: '\+\+|--'
+      scope: keyword.operator.increment.khyept
+    - match: '\*\*|//|[+\-*/%]'
+      scope: keyword.operator.arithmetic.khyept
+    - match: '<<|>>|&|\||\^|~'
+      scope: keyword.operator.bitwise.khyept
+    - match: '&&|\|\||!'
+      scope: keyword.operator.logical.khyept
+    - match: '->'
+      scope: keyword.operator.arrow.khyept
 
   punctuation:
-    - match: '[;,.:]'
+    - match: '\.'
+      scope: punctuation.accessor.khyept
+    - match: '[;,:]'
       scope: punctuation.separator.khyept
-    - match: '[{}\\[\\]()]'
+    - match: '[{}\[\]()]'
       scope: punctuation.bracket.khyept

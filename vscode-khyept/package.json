@@ -2,7 +2,7 @@
   "name": "khyept-language-support",
   "displayName": "Khyept Language Support",
   "description": "Syntax highlighting and editor support for the Khyept programming language.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "main": "./extension.js",
   "activationEvents": [
     "onCommand:khyept.build"

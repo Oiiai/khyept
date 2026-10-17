@@ -2,21 +2,71 @@
   "Function declaration": {
     "prefix": "fn",
     "body": [
-      "fn ${1:void} ${2:name}(${3}) {",
+      "fn ${1:name}(${2}) ${3:-> }${4:void} {",
       "\t$0",
       "}"
     ],
-    "description": "Create a Khyept function"
+    "description": "Create a Khyept function（返回类型可留空，默认 void）"
+  },
+  "Function with return type": {
+    "prefix": "fnr",
+    "body": [
+      "fn ${1:name}(${2}) -> ${3:int} {",
+      "\treturn(${4:value});",
+      "}"
+    ],
+    "description": "Create a Khyept function with a return type"
   },
   "Immutable variable": {
     "prefix": "let",
-    "body": "let ${1:type} ${2:name} = ${3:value};$0",
-    "description": "Create an immutable Khyept variable"
+    "body": "let ${1:name} : ${2:int} = ${3:value};$0",
+    "description": "Create an immutable Khyept variable（类型标注在名字后）"
   },
   "Mutable variable": {
     "prefix": "var",
-    "body": "var ${1:type} ${2:name} = ${3:value};$0",
-    "description": "Create a mutable Khyept variable"
+    "body": "var ${1:name} : ${2:int} = ${3:value};$0",
+    "description": "Create a mutable Khyept variable（类型标注在名字后）"
+  },
+  "Inferred variable": {
+    "prefix": "v",
+    "body": "var ${1:name} := ${2:value};$0",
+    "description": "Declare a variable whose type is inferred by :="
+  },
+  "Struct declaration": {
+    "prefix": "struct",
+    "body": [
+      "struct ${1:Name} {",
+      "\tvar ${2:field} : ${3:int};",
+      "}$0"
+    ],
+    "description": "Create a Khyept struct"
+  },
+  "For loop": {
+    "prefix": "for",
+    "body": [
+      "for (var ${1:i} := 0; ${1:i} < ${2:limit}; ${1:i}++) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Create a Khyept for loop"
+  },
+  "While loop": {
+    "prefix": "while",
+    "body": [
+      "while (${1:condition}) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Create a Khyept while loop"
+  },
+  "If statement": {
+    "prefix": "if",
+    "body": [
+      "if (${1:condition}) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Create a Khyept if statement"
   },
   "Print line": {
     "prefix": "pln",
@@ -27,5 +77,25 @@
     "prefix": "pr",
     "body": "print(${1:value});$0",
     "description": "Print without a newline"
+  },
+  "Print with interpolation": {
+    "prefix": "plnf",
+    "body": "println(f\"${1:value}\");$0",
+    "description": "Print a line with f-string interpolation"
+  },
+  "Read line": {
+    "prefix": "readln",
+    "body": "var ${1:line} : string = readln();$0",
+    "description": "Read a line from stdin as string"
+  },
+  "List literal": {
+    "prefix": "list",
+    "body": "var ${1:name} : list = [${2}];$0",
+    "description": "Create a list"
+  },
+  "Dict literal": {
+    "prefix": "dict",
+    "body": "var ${1:name} : dict = {${2:\"key\"}: ${3:value}};$0",
+    "description": "Create a dict"
   }
 }
